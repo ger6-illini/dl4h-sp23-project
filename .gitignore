@@ -38,4 +38,4 @@ Thumbs.db
 
 # Proprietary data #
 ####################
-all_hourly_data.h5
+/data/all_hourly_data.h5
