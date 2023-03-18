@@ -39,3 +39,4 @@ Thumbs.db
 # Proprietary data #
 ####################
 /data/all_hourly_data.h5
+/data/code_status.csv
