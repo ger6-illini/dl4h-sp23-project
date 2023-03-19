@@ -294,7 +294,6 @@ def get_summaries(mimic_extract_filename='../data/all_hourly_data.h5',
 
     return pat_summ_by_cu_df, pat_summ_by_sapsiiq_df, vitals_labs_summ_df
 
-
 def prepare_data(mimic_extract_filename='../data/all_hourly_data.h5',
                  mimic_sqlalchemy_db_uri='',
                  mimic_data_folder = '../data/',
