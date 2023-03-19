@@ -40,3 +40,5 @@ Thumbs.db
 ####################
 /data/all_hourly_data.h5
 /data/code_status.csv
+/data/saps.csv
+/data/sapsii.csv
