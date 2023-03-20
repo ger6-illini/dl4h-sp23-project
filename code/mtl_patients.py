@@ -1,5 +1,6 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
 
 def transform_into_zscores(x, mean_dict, stdev_dict):
     """ 
@@ -370,8 +371,7 @@ def prepare_data(mimic_extract_filename='../data/all_hourly_data.h5',
     #  3) A note of "Comfort Measures Only" (CMO) = `timecmo_chart` if not null
     # earliest time of the three events is considered the mortality time
     # `mort_time` for all experiments described in the paper
-    patients_df['morttime'] = patients_df[['deathtime', 'dnr_first_charttime', 'timecmo_chart']]. \
-        min(numeric_only=True, axis=1)
+    patients_df['morttime'] = patients_df[['deathtime', 'dnr_first_charttime', 'timecmo_chart']].min(axis=1)
     # `mort_flag` is True if patient dies in hospital or False if not
     # this flag will be used as our prediction label (`Y`)
     patients_df['mort_flag'] = np.where(patients_df['morttime'].isnull(), False, True)
@@ -505,3 +505,60 @@ def prepare_data(mimic_extract_filename='../data/all_hourly_data.h5',
     subject_ids = Y_df.index.get_level_values(0).to_numpy()
 
     return X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids
+
+def stratified_split(X, Y, cohorts, train_val_random_seed=0):
+    """ 
+    Returns splits of X, Y, and a cohort membership array stratified by outcome (binary
+    in-hospital mortality label). Split into training, validation, and test datasets.
+
+    Parameters
+    ----------
+    X : NumPy array of integers
+        A matrix of all data that will be used for training purposes and size P x T x F where
+        P is number of patients, T is number of timesteps (hours and same as `cutoff_hours`),
+        and F is number of features.
+    Y : NumPy vector of integers
+        A vector of size (P,) containing either 1 (patient died) or 0 (patient lived).
+    cohort : NumPy vector of either integers or strings
+        A vector of size (P,) containing the membership of a patient to a cohort.
+    train_val_random_seed : int, default 0
+        Controls shuffling applied to the data before applying the split. Allows reproducible
+        output across multiple function calls.
+
+    Returns
+    -------
+    X_train : NumPy array of integers
+        Subset of X matrix to be used for training.
+    X_val : NumPy array of integers
+        Subset of X matrix to be used for model validation.
+    X_test : NumPy array of integers
+        Subset of X matrix to be used for test.
+    y_train : NumPy vector of integers
+        Subset of Y vector corresponding to X_train.
+    y_val : NumPy vector of integers
+        Subset of Y vector corresponding to X_val.
+    y_test : NumPy vector of integers
+        Subset of Y vector corresponding to X_test.
+    cohorts_train : NumPy vector of integers
+        Subset of cohort vector corresponding to X_train.
+    cohorts_val : NumPy vector of integers
+        Subset of cohort vector corresponding to X_val.
+    cohorts_test : NumPy vector of integers
+        Subset of cohort vector corresponding to X_test.
+    """
+
+    # break X, Y, and cohorts in training/validation/test with split 70%/10%/20% stratified
+    # by Y, the binary label (in-hospital mortality)
+
+    # break X into train+val (80%) and test (20%) stratifying by Y
+    X_train_val, X_test, y_train_val, y_test, cohorts_train_val, cohorts_test = \
+        train_test_split(X, Y, cohorts, test_size=0.2,
+                         random_state=train_val_random_seed, stratify=Y)
+
+    # break train+val into train (87.5% of 80% = 70%) and
+    # validation (12.5% of 80% = 10%) stratifying by y_train_val
+    X_train, X_val, y_train, y_val, cohorts_train, cohorts_val = \
+        train_test_split(X_train_val, y_train_val, cohorts_train_val, test_size=0.125,
+                         random_state=train_val_random_seed, stratify=y_train_val)
+
+    return X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test
