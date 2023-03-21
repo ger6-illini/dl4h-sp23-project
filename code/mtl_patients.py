@@ -1,5 +1,10 @@
 import numpy as np
 import pandas as pd
+from keras.callbacks import EarlyStopping
+from keras.layers import Input, LSTM, RepeatVector
+from keras.models import Model
+from keras.optimizers import Adam
+from sklearn.mixture import GaussianMixture
 from sklearn.model_selection import train_test_split
 
 def transform_into_zscores(x, mean_dict, stdev_dict):
@@ -562,3 +567,105 @@ def stratified_split(X, Y, cohorts, train_val_random_seed=0):
                          random_state=train_val_random_seed, stratify=y_train_val)
 
     return X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test
+
+def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, embedding_dim=50,
+                     epochs=100, learning_rate=0.0001, num_clusters=3, gmm_tol=0.0001,
+                     save_to_filename='../data/unsupervised_clusters.npy'):
+    """ 
+    Discovers patient cohorts in an unsupervised way using two steps: 1) Apply an LSTM autoencoder
+    to create one embedding per patient and 2) Use a Gaussian Mixture Model of `num_clusters` to
+    cluster those embeddings.
+
+    Parameters
+    ----------
+    cutoff_hours : int, default 24
+        Number of hours of data immediately after a patient goes into the ICU that the
+        models will be used during the training stage to predict mortality of the patient.
+    gap_hours : int, default 12
+        Number of hours after the `cutoff_hours` period end before performing a mortality
+        prediction. This gap is maintained to avoid label leakage.
+    train_val_random_seed : int, default 0
+        Controls shuffling applied to the data before applying the split. Allows reproducible
+        output across multiple function calls.
+    embedding_dim : int, default 50
+        Number of hidden dimensions in the LSTM autoencoder (step 1).
+    epochs : int, default 100
+        Number of epochs used to train the LSTM autoencoder (step 1).
+    learning_rate : float, default 0.0001
+        Learning rate for the LSTM autoencoder (step 1).
+    num_clusters : int, default 3
+        Number of clusters given to the Gaussian Mixture Model (step 2).
+    gmm_tol : float, default 0.0001
+        Convergence threshold for Gaussian Mixture Model (step 2).
+    save_to_filename : str, default '../data/unsupervised_clusters.npy'
+        Filename where array of cluster memberships will be saved to using NumPy format.
+
+    Returns
+    -------
+    cohort_unsupervised : NumPy array of integers
+        Array indicating cohort membership for each patient.
+    """
+
+    X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
+
+    # Do train/validation/test split using careunits as the cohort classifier
+    X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test = \
+        stratified_split(X, Y, cohort_careunits, train_val_random_seed=train_val_random_seed)
+
+    num_timesteps = X_train.shape[1]  # number of timesteps (T), e.g., 24 hours
+    num_features = X_train.shape[2]   # number of features (F), e.g., 232
+    embedding_dim = embedding_dim     # hidden representation dimension
+
+    # 1) take a temporal sequence of 1D vectors of `num_features` (F)
+    inputs = Input(shape=(num_timesteps, num_features))
+    # 2) encode it using an LSTM into a 1D vector with `embedding_dim` elements
+    encoded = LSTM(embedding_dim)(inputs)
+    # 3) repeat the embedding from the encoder T times so we can feed the result
+    #    to a decoder and the reconstructed representation of the input
+    decoded = RepeatVector(num_timesteps)(encoded)
+    # 4) decode the result using an LSTM of size `num_features` to get the
+    #    reconstructed representation of the input
+    decoded = LSTM(num_features, return_sequences=True)(decoded)
+
+    # the LSTM autoencoder model takes the input, encode it to an embedding,
+    # decode it from the embeddeing and provides a reconstructed output
+    lstm_autoencoder = Model(inputs, decoded)
+
+    # the encoder model is the one that is trained once the LSTM autoencoder
+    # model is trained, and will be used to get the embeddings
+    encoder = Model(inputs, encoded)
+
+    lstm_autoencoder.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse')
+    early_stopping = EarlyStopping(monitor='val_loss', patience=3)
+
+    # fit (train) the LSTM autoencoder model
+    print("Training LSTM autoencoder started...")
+    lstm_autoencoder.fit(X_train, X_train,
+        epochs=epochs,
+        batch_size=128,
+        shuffle=True,
+        callbacks=[early_stopping],
+        validation_data=(X_val, X_val))
+    print("Training LSTM autoencoder trained!")
+
+    # now that the LSTM autoencoder model is trained
+    # the corresponding encoder is trained as well
+    # and we can use it to encode X
+    embeddings_X_train = encoder.predict(X_train)
+    embeddings_X = encoder.predict(X)
+    print(f"Patient embeddings created! Shape: {embeddings_X.shape}")
+
+    # With the embeddings now we can fit a Gaussian Mixture Model
+    print("Training Gaussian Mixture Model...")
+    gmm = GaussianMixture(n_components=num_clusters, tol=gmm_tol, verbose=True)
+    gmm.fit(embeddings_X_train)
+
+    # Finally, we can calculate the cluster membership
+    cohort_unsupervised = gmm.predict(embeddings_X)
+    print(f"Gaussian Mixture Model applied to embeddings! Results shape: {cohort_unsupervised.shape}")
+
+    # Let's save the cluster results
+    np.save(save_to_filename, cohort_unsupervised)
+    print(f"Cluster results saved to '{save_to_filename}'")
+
+    return cohort_unsupervised
