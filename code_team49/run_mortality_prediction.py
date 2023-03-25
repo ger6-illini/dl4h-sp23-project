@@ -1508,10 +1508,7 @@ def load_processed_data_v2(cutoff_hours=24, gap_hours=12,
         reset_index(['hadm_id', 'icustay_id'], drop=True).groupby(level=0).max()
     cohort_sapsii_quartile = np.squeeze(cohort_sapsii_quartile_df.to_numpy(), axis=1)
     subject_ids = Y_df.index.get_level_values(0).to_numpy()
-
-    # save to files so they can be used by author's code
-    X.to_hdf('../data/X.h5', key='X', mode='w')
-
+    
     return X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids
 
 
@@ -1556,7 +1553,7 @@ if __name__ == "__main__":
             sys.exit(0)
 
     # Load Data
-    X, Y, careunits, saps_quartile, subject_ids = load_processed_data(
+    X, Y, careunits, saps_quartile, subject_ids = load_processed_data_v2(
         FLAGS.data_hours, FLAGS.gap_time)
     Y = Y.astype(int)
 
