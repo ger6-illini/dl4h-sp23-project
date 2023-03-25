@@ -18,10 +18,10 @@ from tensorflow.keras.optimizers import Adam
 # from keras import backend as K
 from tensorflow.compat.v1.keras import backend as K
 from keras.models import Sequential, load_model
-from keras.layers import Dense, Input
+from keras.layers import Dense, Input, LSTM
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.models import Model
-from keras.layers.recurrent import LSTM
+#from keras.layers.recurrent import LSTM
 
 # np.set_printoptions(threshold=np.nan)
 np.set_printoptions(threshold=sys.maxsize)
