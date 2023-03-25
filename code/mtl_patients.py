@@ -648,7 +648,7 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
         shuffle=True,
         callbacks=[early_stopping],
         validation_data=(X_val, X_val))
-    print("Training LSTM autoencoder trained!")
+    print("LSTM autoencoder trained!")
 
     # now that the LSTM autoencoder model is trained
     # the corresponding encoder is trained as well
@@ -706,6 +706,7 @@ def create_single_task_learning_model(lstm_layer_size, input_dims, output_dims, 
     return model
 
 def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hours=12,
+                                  save_to_folder='../data/',
                                   cohort_criteria_to_select='careunits',
                                   train_val_random_seed=0,
                                   cohort_unsupervised_filename='../data/unsupervised_clusters.npy',
@@ -727,6 +728,8 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
     gap_hours : int, default 12
         Number of hours after the `cutoff_hours` period end before performing a mortality
         prediction. This gap is maintained to avoid label leakage.
+    save_to_folder: str, default '../data/'
+        Name of the folder where subfolders 'models' and 'results' will be created.
     cohort_criteria_to_select : {'careunit', 'sapsii_quartile', 'unsupervised'}, default='unsupervised'
         Indicates which cohort criteria to select to run the model: first careunit ('careunit'),
         SAPS II quartile ('sapsii_quartile'), or the result of the cohort discovery process using
@@ -749,6 +752,11 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
     Returns
     -------
     """
+
+    # create folders to store models and results
+    for folder in ['results', 'models']:
+        if not os.path.exists(os.path.join(save_to_folder, folder)):
+            os.makedirs(os.path.join(save_to_folder, folder))
 
     X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
 
@@ -781,6 +789,8 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
         # calculate sample weight as the cohort's inverse frequency corresponding to each sample
         sample_weight = np.array([task_weights[cohort] for cohort in cohorts_train])
 
+    model_filename = f"{save_to_folder}models/model_{cutoff_hours}+{gap_hours}_{cohort_criteria_to_select}"
+
     if model_type == 'global':
         #-----------------------
         # train the global model
@@ -796,20 +806,18 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
 
         model.fit(X_train, y_train, epochs=epochs, batch_size=100, sample_weight=sample_weight,
                   callbacks=[early_stopping], validation_data=(X_val, y_val))
+        model.save(model_filename)
 
         print("+" * 80)
         print(f">> Predicting using '{model_type}' model...")
         y_pred = model.predict(X_test)
 
-        df_metrics = pd.DataFrame(index=tasks + ['Macro', 'Micro'])
+        df_metrics = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']))
 
         # calculate AUC for every cohort
         lst_of_auc = []
         for task in tasks:
-            try:
-                auc = roc_auc_score(y_test[cohorts_test == task], y_pred[cohorts_test == task])
-            except:
-                auc = np.nan
+            auc = roc_auc_score(y_test[cohorts_test == task], y_pred[cohorts_test == task])
             lst_of_auc.append(auc)
             df_metrics.loc[task, 'AUC'] = auc
 
