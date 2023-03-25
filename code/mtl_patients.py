@@ -1,9 +1,11 @@
+import os
 import numpy as np
 import pandas as pd
 from keras.callbacks import EarlyStopping
-from keras.layers import Input, LSTM, RepeatVector
-from keras.models import Model
+from keras.layers import Input, Dense, LSTM, RepeatVector
+from keras.models import Model, Sequential
 from keras.optimizers import Adam
+from sklearn.metrics import roc_auc_score
 from sklearn.mixture import GaussianMixture
 from sklearn.model_selection import train_test_split
 
@@ -570,8 +572,8 @@ def stratified_split(X, Y, cohorts, train_val_random_seed=0):
 
 def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, embedding_dim=50,
                      epochs=100, learning_rate=0.0001, num_clusters=3, gmm_tol=0.0001,
-                     save_to_filename='../data/unsupervised_clusters.npy'):
-    """ 
+                     cohort_unsupervised_filename='../data/unsupervised_clusters.npy'):
+    """
     Discovers patient cohorts in an unsupervised way using two steps: 1) Apply an LSTM autoencoder
     to create one embedding per patient and 2) Use a Gaussian Mixture Model of `num_clusters` to
     cluster those embeddings.
@@ -597,7 +599,7 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
         Number of clusters given to the Gaussian Mixture Model (step 2).
     gmm_tol : float, default 0.0001
         Convergence threshold for Gaussian Mixture Model (step 2).
-    save_to_filename : str, default '../data/unsupervised_clusters.npy'
+    cohort_unsupervised_filename : str, default '../data/unsupervised_clusters.npy'
         Filename where array of cluster memberships will be saved to using NumPy format.
 
     Returns
@@ -665,7 +667,156 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
     print(f"Gaussian Mixture Model applied to embeddings! Results shape: {cohort_unsupervised.shape}")
 
     # Let's save the cluster results
-    np.save(save_to_filename, cohort_unsupervised)
-    print(f"Cluster results saved to '{save_to_filename}'")
+    np.save(cohort_unsupervised_filename, cohort_unsupervised)
+    print(f"Cluster results saved to '{cohort_unsupervised_filename}'")
 
     return cohort_unsupervised
+
+def create_single_task_learning_model(lstm_layer_size, input_dims, output_dims, learning_rate):
+    """
+    Creates a single task learning (STL) model with one LSTM layer followed by one output dense layer (sigmoided).
+
+    Parameters
+    ----------
+    lstm_layer_size : int
+        Number of units in LSTM layer. Applies to all models.
+    input_dims : NumPy (2D) array of integers
+        Number of (2D) features in the input.
+    output_dims : int
+        Number of outputs (1 for binary tasks).
+    learning_rate : float, default 0.0001
+        Learning rate for the model.
+
+    Returns
+    -------
+    model : TensorFlow model
+        Compiled model with the defined architecture.
+    """
+
+    model = Sequential()
+
+    # add LSTM layer to the model
+    model.add(LSTM(units=lstm_layer_size, activation='relu', input_shape=input_dims, return_sequences=False))
+
+    # add output (dense) layer to the  model
+    model.add(Dense(units=output_dims, activation='sigmoid'))
+
+    model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0001), metrics=['accuracy'])
+
+    return model
+
+def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hours=12,
+                                  cohort_criteria_to_select='careunits',
+                                  train_val_random_seed=0,
+                                  cohort_unsupervised_filename='../data/unsupervised_clusters.npy',
+                                  lstm_layer_size=16,
+                                  epochs=100, learning_rate=0.0001,
+                                  use_cohort_inv_freq_weights=False):
+    """
+    Runs the in-hospital mortality prediction task using one of the three models specified in the
+    original paper: global (single task), multitask, and separate (single task).
+    or separate.
+
+    Parameters
+    ----------
+    model_type : {'global', 'multitask', 'separate'}, default 'global'
+        Type of model as indicated in the original paper to use in the prediction task.
+    cutoff_hours : int, default 24
+        Number of hours of data immediately after a patient goes into the ICU that the
+        models will be used during the training stage to predict mortality of the patient.
+    gap_hours : int, default 12
+        Number of hours after the `cutoff_hours` period end before performing a mortality
+        prediction. This gap is maintained to avoid label leakage.
+    cohort_criteria_to_select : {'careunit', 'sapsii_quartile', 'unsupervised'}, default='unsupervised'
+        Indicates which cohort criteria to select to run the model: first careunit ('careunit'),
+        SAPS II quartile ('sapsii_quartile'), or the result of the cohort discovery process using
+        the LSTM autoencoder followed by the Gaussian Mixture Model, i.e., `discover_cohorts()`.
+    train_val_random_seed : int, default 0
+        Controls shuffling applied to the data before applying the split. Allows reproducible
+        output across multiple function calls.
+    cohort_unsupervised_filename : str, default '../data/unsupervised_clusters.npy'
+        Filename where array of cluster memberships will be saved to using NumPy format.
+    lstm_layer_size : int, default 16
+        Number of units in LSTM layer. Applies to all models.
+    epochs : int, default 100
+        Number of epochs used to train the model.
+    learning_rate : float, default 0.0001
+        Learning rate for the model.
+    use_cohort_inv_freq_weights : bool, default=False
+        This is an indicator flag to weight samples by their cohort's inverse frequency,
+        i.e., smaller cohorts has higher weights during training.
+
+    Returns
+    -------
+    """
+
+    X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
+
+    # fetch right cohort criteria
+    if cohort_criteria_to_select == 'careunits':
+        cohort_criteria = cohort_careunits
+    elif cohort_criteria_to_select == 'sapsii_quartile':
+        cohort_criteria = cohort_sapsii_quartile
+    elif cohort_criteria_to_select == 'unsupervised':
+        cohort_criteria = np.load(f"{cohort_unsupervised_filename}")
+
+    # Do train/validation/test split using `cohort_criteria` as the cohort classifier
+    X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test = \
+        stratified_split(X, Y, cohort_criteria, train_val_random_seed=train_val_random_seed)
+
+    # one task by distinct cohort
+    tasks = np.unique(cohorts_train)
+
+    # calculate number of samples per cohort and its reciprocal
+    # (to be used in sample weight calculation)
+    print(">> Calculating number of training samples in cohort...")
+    task_weights = {}    
+    for cohort in tasks:
+        num_samples_in_cohort = len(np.where(cohorts_train == cohort)[0])
+        print(f"# of patients in cohort {cohort} is {str(num_samples_in_cohort)}")
+        task_weights[cohort] = len(X_train) / num_samples_in_cohort
+
+    sample_weight = None
+    if use_cohort_inv_freq_weights:
+        # calculate sample weight as the cohort's inverse frequency corresponding to each sample
+        sample_weight = np.array([task_weights[cohort] for cohort in cohorts_train])
+
+    if model_type == 'global':
+        #-----------------------
+        # train the global model
+
+        print("+" * 80)
+        print(f">> Training '{model_type}' model...")
+
+        model = create_single_task_learning_model(lstm_layer_size=lstm_layer_size, input_dims=X_train.shape[1:],
+                                                  output_dims=1, learning_rate=learning_rate)
+        print(model.summary())
+
+        early_stopping = EarlyStopping(monitor='val_loss', patience=4)
+
+        model.fit(X_train, y_train, epochs=epochs, batch_size=100, sample_weight=sample_weight,
+                  callbacks=[early_stopping], validation_data=(X_val, y_val))
+
+        print("+" * 80)
+        print(f">> Predicting using '{model_type}' model...")
+        y_pred = model.predict(X_test)
+
+        df_metrics = pd.DataFrame(index=tasks + ['Macro', 'Micro'])
+
+        # calculate AUC for every cohort
+        lst_of_auc = []
+        for task in tasks:
+            try:
+                auc = roc_auc_score(y_test[cohorts_test == task], y_pred[cohorts_test == task])
+            except:
+                auc = np.nan
+            lst_of_auc.append(auc)
+            df_metrics.loc[task, 'AUC'] = auc
+
+        # calculate macro AUC
+        df_metrics.loc['Macro', 'AUC'] = np.nanmean(np.array(lst_of_auc), axis=0)
+
+        # calculate micro AUC
+        df_metrics.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_pred)
+
+        return df_metrics
