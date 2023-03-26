@@ -103,14 +103,22 @@ def categorize_ethnicity(ethnicity):
 
     return ethnicity_category
 
-def get_summaries(mimic_extract_filename='../data/all_hourly_data.h5',
-                 mimic_sqlalchemy_db_uri='',
-                 mimic_data_folder = '../data/'):
+def get_summaries(cutoff_hours=24,
+                  gap_hours=12,
+                  mimic_extract_filename='../data/all_hourly_data.h5',
+                  mimic_sqlalchemy_db_uri='',
+                  mimic_data_folder = '../data/'):
     """ 
     Returns summaries of data coming from publicly available sources (MIMIC-III database).
 
     Parameters
     ----------
+    cutoff_hours : int, default 24
+        Number of hours of data immediately after a patient goes into the ICU that the
+        models will be used during the training stage to predict mortality of the patient.
+    gap_hours : int, default 12
+        Number of hours after the `cutoff_hours` period end before performing a mortality
+        prediction. This gap is maintained to avoid label leakage.
     mimic_extract_filename : str, default '../data/all_hourly_data.h5'
         String containing the full pathname of the file resulting from running the
         MIMIC-Extract (Wang et al., 2020) pipeline.
@@ -128,62 +136,122 @@ def get_summaries(mimic_extract_filename='../data/all_hourly_data.h5',
     pat_summ_by_cu_df : Pandas DataFrame
         A dataframe providing a summary of statistics of patients broken by careunit.
     pat_summ_by_sapsiiq_df : Pandas DataFrame
-        A dataframe providing a summary of statistics of patients broken by SAPS-II score quartile.
+        A dataframe providing a summary of statistics of patients broken by SAPS II score quartile.
     vitals_labs_summ_df : Pandas DataFrame
         A dataframe providing a summary of statistics of the 29 vitals/labs selected by the paper.
     """
-    
+
+    print('+' * 80, flush=True)
+    print('Creating summaries', flush=True)
+    print('-' * 80, flush=True)
+
+    print('    Loading data from MIMIC-Extract pipeline...')
+
     # the next two MIMIC-Extract pipeline dataframes are needed to reproduce the paper
     patients_df = pd.read_hdf(mimic_extract_filename, 'patients')
     vitals_labs_mean_df = pd.read_hdf(mimic_extract_filename, 'vitals_labs_mean')
 
-    # MIMIC-Extract pipeline does not provide the features `timecmo_chart` and `sapsii` that
-    # are needed to reproduce the paper code; we need to fetch them from a MIMIC PostgreSQL
-    # database inside the concept tables `code_status` and `sapsii` or the CSV files
-    # 'code_status.csv' and 'sapsii.csv' and add them to the `patients_df` dataframe
-    if (mimic_sqlalchemy_db_uri != ''):
-        code_status_df = pd.read_sql_table('code_status', mimic_sqlalchemy_db_uri)
-        sapsii_df = pd.read_sql_table('sapsii', mimic_sqlalchemy_db_uri)
-    else:
-        code_status_df = pd.read_csv(f'{mimic_data_folder}code_status.csv')
-        sapsii_df = pd.read_csv(f'{mimic_data_folder}sapsii.csv')
-    code_status_df.set_index(['subject_id', 'hadm_id', 'icustay_id'], inplace=True)
-    sapsii_df.set_index(['subject_id', 'hadm_id', 'icustay_id'], inplace=True)
-    code_status_df['timecmo_chart'] = pd.to_datetime(code_status_df['timecmo_chart'])
-    patients_df = pd.merge(patients_df, code_status_df['timecmo_chart'], left_index=True, right_index=True)
+    # paper considers the following static variables (per patient)
+    static_df = patients_df[['first_careunit', 'intime', 'deathtime', 'dischtime', 'gender', 'age', 'ethnicity']]
 
-    # calculate SAPS-II score quartile and add it to `patients_df`
+    # paper considers 29 vitals and labs (time-varying series)
+    vitals_labs_to_keep_list = [
+        'anion gap',
+        'bicarbonate',
+        'blood urea nitrogen',
+        'chloride',
+        'creatinine',
+        'diastolic blood pressure',
+        'fraction inspired oxygen',
+        'glascow coma scale total',
+        'glucose',
+        'heart rate',
+        'hematocrit',
+        'hemoglobin',
+        'lactate',
+        'magnesium',
+        'mean blood pressure',
+        'oxygen saturation',
+        'partial thromboplastin time',
+        'phosphate',
+        'platelets',
+        'potassium',
+        'prothrombin time inr',
+        'prothrombin time pt',
+        'respiratory rate',
+        'sodium',
+        'systolic blood pressure',
+        'temperature',
+        'weight',
+        'white blood cell count',
+        'ph'
+    ]
+    X = vitals_labs_mean_df[vitals_labs_to_keep_list]
+    X = X.droplevel(1, axis=1).reset_index()
+    # Note: X at this point in time contains only the physiological data (no static data)
+
+    # add SAPS II score to static dataframe
+    print('    Adding SAPS II score to static dataset...', flush=True)
+    sapsii_df = pd.read_csv(f'{mimic_data_folder}sapsii.csv')
     _, bins = pd.qcut(sapsii_df.sapsii, 4, retbins=True, labels=False)
     sapsii_df['sapsii_quartile'] = pd.cut(sapsii_df.sapsii, bins=bins, labels=False, include_lowest=True)
-    patients_df = pd.merge(patients_df, sapsii_df[['sapsii', 'sapsii_quartile']], left_index=True, right_index=True)
+    sapsii_df = sapsii_df[['subject_id', 'hadm_id', 'icustay_id', 'sapsii_quartile', 'sapsii']]
+    static_df = pd.merge(static_df, sapsii_df, how='left', on=['subject_id', 'hadm_id', 'icustay_id'])
 
-    #-----------------------------------------------------------------------------
-    # paper considers in-hospital mortality as any of these three events:
-    #  1) Death = `deathtime` feature if not null
-    #  2) A note of "Do Not Resuscitate" (DNR) = `dnr_first_charttime` if not null
-    #  3) A note of "Comfort Measures Only" (CMO) = `timecmo_chart` if not null
-    # earliest time of the three events is considered the mortality time
-    # `mort_time` for all experiments described in the paper
-    patients_df['morttime'] = patients_df[['deathtime', 'dnr_first_charttime', 'timecmo_chart']].min(axis=1)
-    # `mort_flag` is True if patient dies in hospital or False if not
-    # this flag will be used as our prediction label (`Y`)
-    patients_df['mort_flag'] = np.where(patients_df['morttime'].isnull(), False, True)
+    # add mortality outcome which in this paper is not just death, but CMO (Comfort Measures Only) too:
+    #  - `mort_hosp_valid` which is a flag (True: patient died, False: patient alive)
+    #  - `min_mort_time` which is the minimum timestamp of deathtime, the CMO note, or the DNR (Do Not Resuscitate) note.
+    print('    Adding mortality columns to static dataset...', flush=True)
+    deathtimes_df = static_df[['subject_id', 'hadm_id', 'icustay_id', 'deathtime', 'dischtime']].dropna()
+    deathtimes_valid_df = deathtimes_df[deathtimes_df.dischtime >= deathtimes_df.deathtime].copy()
+    deathtimes_valid_df.loc[:, 'mort_hosp_valid'] = True
+    cmo_df = pd.read_csv(f'{mimic_data_folder}code_status.csv')
+    cmo_df = cmo_df[cmo_df.cmo > 0]  # only keep those patients with a CMO note
+    cmo_df['dnr_first_charttime'] = pd.to_datetime(cmo_df.dnr_first_charttime)
+    cmo_df['timecmo_chart'] = pd.to_datetime(cmo_df.timecmo_chart)
+    cmo_df['cmo_df_min_time'] = cmo_df.loc[:, ['dnr_first_charttime', 'timecmo_chart']].min(axis=1)
+    all_mort_times_df = pd.merge(deathtimes_valid_df, cmo_df, on=['subject_id', 'hadm_id', 'icustay_id'], how='outer') \
+        [['subject_id', 'hadm_id', 'icustay_id', 'deathtime', 'dischtime', 'cmo_df_min_time']]
+    all_mort_times_df['deathtime'] = pd.to_datetime(all_mort_times_df.deathtime)
+    all_mort_times_df['cmo_df_min_time'] = pd.to_datetime(all_mort_times_df.cmo_df_min_time)
+    all_mort_times_df['min_mort_time'] = all_mort_times_df.loc[:, ['deathtime', 'cmo_df_min_time']].min(axis=1)
+    min_mort_time_df = all_mort_times_df[['subject_id', 'hadm_id', 'icustay_id', 'min_mort_time']]
+    static_df = pd.merge(static_df, min_mort_time_df, on=['subject_id', 'hadm_id', 'icustay_id'], how='left')
+    static_df['mort_hosp_valid'] = np.invert(np.isnat(static_df.min_mort_time))
+
+    # only keep patients that stayed alive after at least `cutoff_hours` hours in the ICU
+    # or died after `cutoff hours` + `gap hours` hours, e.g., 36 hours
+    static_df['time_til_mort'] = pd.to_datetime(static_df.min_mort_time) - pd.to_datetime(static_df.intime)
+    static_df['time_til_mort'] = static_df.time_til_mort.apply(lambda x: x.total_seconds() / 3600)
+    static_df['time_in_icu'] = pd.to_datetime(static_df.dischtime) - pd.to_datetime(static_df.intime)
+    static_df['time_in_icu'] = static_df.time_in_icu.apply(lambda x: x.total_seconds() / 3600)
+    static_df = static_df[((static_df.time_in_icu >= cutoff_hours) & (static_df.mort_hosp_valid == False)) 
+                          | (static_df.time_til_mort >= cutoff_hours + gap_hours)]
+
+    static_to_keep_df = static_df[['subject_id', 'gender', 'age', 'ethnicity', 'sapsii_quartile', \
+                                   'sapsii', 'first_careunit', 'mort_hosp_valid']].copy()
+
+    # merge the physiological data with the static data
+    print('    Merging dataframes to create X_full...', flush=True)
+    X_full = pd.merge(X.reset_index(), static_to_keep_df, on='subject_id', how='inner')
+    X_full = X_full.set_index(['subject_id', 'hours_in'])
 
     # `gender_male` will allow male patients count
-    patients_df['gender_male'] = np.where(patients_df['gender'] == 'M', 1, 0)
+    static_to_keep_df['gender_male'] = np.where(static_to_keep_df['gender'] == 'M', 1, 0)
 
     #--------------------
     # summary by careunit
-    pat_summ_by_cu_df = patients_df.groupby('first_careunit').agg(
+    print('    Creating summary by careunit...', flush=True)
+    pat_summ_by_cu_df = static_to_keep_df.groupby('first_careunit').agg(
         N=('age', 'size'),
-        n=('mort_flag', 'sum'),
+        n=('mort_hosp_valid', 'sum'),
         age_mean=('age', 'mean'),
         gender_male=('gender_male', 'sum')
     )
     ## overall portion of summary by careunit
-    pat_summ_overall_df = patients_df.groupby(['Overall'] * len(patients_df)).agg(
+    pat_summ_overall_df = static_to_keep_df.groupby(['Overall'] * len(static_to_keep_df)).agg(
         N=('age', 'size'),
-        n=('mort_flag', 'sum'),
+        n=('mort_hosp_valid', 'sum'),
         age_mean=('age', 'mean'),
         gender_male=('gender_male', 'sum')
     )
@@ -200,20 +268,21 @@ def get_summaries(mimic_extract_filename='../data/all_hourly_data.h5',
     pat_summ_by_cu_df['Gender (Male)'] = pat_summ_by_cu_df['Gender (Male)'].round(2)
 
     #----------------------------------
-    # summary by SAPS-II score quartile
-    pat_summ_by_sapsiiq_df = patients_df.groupby('sapsii_quartile').agg(
+    # summary by SAPS II score quartile
+    print('    Creating summary by SAPS II score quartile...', flush=True)
+    pat_summ_by_sapsiiq_df = static_to_keep_df.groupby('sapsii_quartile').agg(
         N=('age', 'size'),
-        n=('mort_flag', 'sum'),
+        n=('mort_hosp_valid', 'sum'),
         age_mean=('age', 'mean'),
         gender_male=('gender_male', 'sum'),
         sapsii_mean=('sapsii', 'mean'),
         sapsii_min=('sapsii', 'min'),
         sapsii_max=('sapsii', 'max')
     )
-    ## overall portion of summary by SAPS-II score quartile
-    pat_summ_overall_df = patients_df.groupby(['Overall'] * len(patients_df)).agg(
+    ## overall portion of summary by SAPS II score quartile
+    pat_summ_overall_df = static_to_keep_df.groupby(['Overall'] * len(static_to_keep_df)).agg(
         N=('age', 'size'),
-        n=('mort_flag', 'sum'),
+        n=('mort_hosp_valid', 'sum'),
         age_mean=('age', 'mean'),
         gender_male=('gender_male', 'sum'),
         sapsii_mean=('sapsii', 'mean'),
@@ -225,71 +294,38 @@ def get_summaries(mimic_extract_filename='../data/all_hourly_data.h5',
     pat_summ_by_sapsiiq_df['Class Imbalance'] = pat_summ_by_sapsiiq_df['n'] / pat_summ_by_sapsiiq_df['N']
     pat_summ_by_sapsiiq_df['Gender (Male)'] = pat_summ_by_sapsiiq_df['gender_male'] / pat_summ_by_sapsiiq_df['N']
     ## cosmetic changes to reproduce format similar to paper's table 1
-    pat_summ_by_sapsiiq_df.index.name = 'SAPS-II Quartile'
+    pat_summ_by_sapsiiq_df.index.name = 'SAPS II Quartile'
     pat_summ_by_sapsiiq_df.rename(columns={'age_mean': 'Age (Mean)',
-                                        'sapsii_min': 'SAPS-II (Min)',
-                                        'sapsii_mean': 'SAPS-II (Mean)',
-                                        'sapsii_max': 'SAPS-II (Max)'}, inplace=True)
+                                        'sapsii_min': 'SAPS II (Min)',
+                                        'sapsii_mean': 'SAPS II (Mean)',
+                                        'sapsii_max': 'SAPS II (Max)'}, inplace=True)
     pat_summ_by_sapsiiq_df = pat_summ_by_sapsiiq_df[['N', 'n', 'Class Imbalance', 'Age (Mean)', 'Gender (Male)',
-                                                    'SAPS-II (Min)', 'SAPS-II (Mean)', 'SAPS-II (Max)']]
+                                                    'SAPS II (Min)', 'SAPS II (Mean)', 'SAPS II (Max)']]
     pat_summ_by_sapsiiq_df['Class Imbalance'] = pat_summ_by_sapsiiq_df['Class Imbalance'].round(3)
     pat_summ_by_sapsiiq_df['Age (Mean)'] = pat_summ_by_sapsiiq_df['Age (Mean)'].round(2)
     pat_summ_by_sapsiiq_df['Gender (Male)'] = pat_summ_by_sapsiiq_df['Gender (Male)'].round(2)
-    pat_summ_by_sapsiiq_df['SAPS-II (Min)'] = pat_summ_by_sapsiiq_df['SAPS-II (Min)'].round(2)
-    pat_summ_by_sapsiiq_df['SAPS-II (Mean)'] = pat_summ_by_sapsiiq_df['SAPS-II (Mean)'].round(2)
-    pat_summ_by_sapsiiq_df['SAPS-II (Max)'] = pat_summ_by_sapsiiq_df['SAPS-II (Max)'].round(2)
+    pat_summ_by_sapsiiq_df['SAPS II (Min)'] = pat_summ_by_sapsiiq_df['SAPS II (Min)'].round(2)
+    pat_summ_by_sapsiiq_df['SAPS II (Mean)'] = pat_summ_by_sapsiiq_df['SAPS II (Mean)'].round(2)
+    pat_summ_by_sapsiiq_df['SAPS II (Max)'] = pat_summ_by_sapsiiq_df['SAPS II (Max)'].round(2)
 
     #-----------------------
     # summary by vitals/labs
 
+    print('    Creating summary by vitals/labs...', flush=True)
+
     # calculate total of hours per patient
     # this will allow to calculate percentage of non-missing data later
-    total_hours = len(vitals_labs_mean_df.groupby(['subject_id', 'hadm_id', 'icustay_id', 'hours_in']).size())
+    total_hours = len(X_full.groupby(['subject_id', 'hadm_id', 'icustay_id', 'hours_in']).size())
 
-    # paper considers the following 29 vitals and labs 
-    vitals_labs_to_keep_list = [
-        'anion gap',
-        'bicarbonate',
-        'blood urea nitrogen',
-        'chloride',
-        'creatinine',
-        'diastolic blood pressure',
-        'fraction inspired oxygen',
-        'glascow coma scale total',
-        'glucose',
-        'heart rate',
-        'hematocrit',
-        'hemoglobin',
-        'lactate',
-        'magnesium',
-        'mean blood pressure',
-        'oxygen saturation',
-        'partial thromboplastin time',
-        'phosphate',
-        'platelets',
-        'potassium',
-        'prothrombin time inr',
-        'prothrombin time pt',
-        'respiratory rate',
-        'sodium',
-        'systolic blood pressure',
-        'temperature',
-        'weight',
-        'white blood cell count',
-        'ph'
-    ]
+    X_full.reset_index(inplace=True)
+    X_full.set_index(['subject_id', 'hadm_id', 'icustay_id', 'hours_in'], inplace=True)
+    X_full.drop(columns=['index'], inplace=True)
+    X_full = X_full.iloc[:, :-7]
 
-    # subset MIMIC-Extract data to the list of vitals/labs used in the paper
-    vitals_labs_df = vitals_labs_mean_df[vitals_labs_to_keep_list]
-        
-    vitals_labs_df = vitals_labs_df.reset_index(['subject_id', 'hadm_id', 'icustay_id', 'hours_in'], drop=True)
-    vitals_labs_df = vitals_labs_df.droplevel(1, axis=1)
-
-    # transform `vitals_labs_df` from wide into long format
-    vitals_labs_long_df = pd.melt(vitals_labs_df, value_vars=vitals_labs_df.columns)
+    # transform `X_full` from wide into long format
+    vitals_labs_long_df = pd.melt(X_full, value_vars=X_full.columns)
     vitals_labs_long_df.rename(columns={'LEVEL2': 'Vital/Lab Measurement'}, inplace=True)
-
-    vitals_labs_summ_df = vitals_labs_long_df.groupby('Vital/Lab Measurement').agg(
+    vitals_labs_summ_df = vitals_labs_long_df.groupby('variable').agg(
         min=('value', 'min'),
         avg=('value', 'mean'),
         max=('value', 'max'),
@@ -300,36 +336,34 @@ def get_summaries(mimic_extract_filename='../data/all_hourly_data.h5',
     vitals_labs_summ_df['pres.'] = vitals_labs_summ_df['N'] / total_hours
     vitals_labs_summ_df = vitals_labs_summ_df.round({'min': 2, 'avg': 2, 'max': 2, 'std': 2, 'pres.': 4})
 
+    print('    Done!', flush=True)
+
     return pat_summ_by_cu_df, pat_summ_by_sapsiiq_df, vitals_labs_summ_df
 
-def prepare_data(mimic_extract_filename='../data/all_hourly_data.h5',
-                 mimic_sqlalchemy_db_uri='',
-                 mimic_data_folder = '../data/',
-                 cutoff_hours=24,
-                 gap_hours=12):
-    """ 
+def prepare_data(cutoff_hours=24,
+                 gap_hours=12,
+                 mimic_extract_filename='../data/all_hourly_data.h5',
+                 mimic_data_folder = '../data/'
+                ):
+    """
     Prepares data coming from publicly available sources (MIMIC-III database), so it
     becomes ready to be used by the two-step pipeline proposed by the original paper.
 
     Parameters
     ----------
-    mimic_extract_filename : str, default '../data/all_hourly_data.h5'
-        String containing the full pathname of the file resulting from running the
-        MIMIC-Extract (Wang et al., 2020) pipeline.
-    mimic_sqlalchemy_db_uri : str, default ''
-        String containing the database URI used by SQLAlchemy to access the PostgreSQL
-        MIMIC database. A typical value could be 'postgresql:///mimic'. If blank, the
-        'mimic_data_folder' parameter is used instead.
-    mimic_data_folder : str, default '../data/'
-        String containing the folder name (including the trailing slash) where the
-        additional MIMIC concept tables saved as the CSV files, `code_status.csv` and
-        `sapsii.csv` are stored.
     cutoff_hours : int, default 24
         Number of hours of data immediately after a patient goes into the ICU that the
         models will be used during the training stage to predict mortality of the patient.
     gap_hours : int, default 12
         Number of hours after the `cutoff_hours` period end before performing a mortality
         prediction. This gap is maintained to avoid label leakage.
+    mimic_extract_filename : str, default '../data/all_hourly_data.h5'
+        String containing the full pathname of the file resulting from running the
+        MIMIC-Extract (Wang et al., 2020) pipeline.
+    mimic_data_folder : str, default '../data/'
+        String containing the folder name (including the trailing slash) where the
+        additional MIMIC concept tables saved as the CSV files, `code_status.csv` and
+        `sapsii.csv` are stored.
 
     Returns
     -------
@@ -339,71 +373,28 @@ def prepare_data(mimic_extract_filename='../data/all_hourly_data.h5',
         and F is number of features.
     Y : NumPy vector of integers
         A vector of size (P,) containing either 1 (patient died) or 0 (patient lived).
-    cohort_careunits : NumPy vector of strings
+    careunits : NumPy vector of strings
         A vector of size (P,) containing the name of the careunit (ICU) the patient went in first.
-    cohort_sapsii_quartile : NumPy vector of integers
-        A vector of size (P,) containing the quartile of the SAPS-II score for every patient.
+    sapsii_quartile : NumPy vector of integers
+        A vector of size (P,) containing the quartile of the SAPS II score for every patient.
     subject_ids : NumPy vector of integers
         A vector of size (P,) containing the `subject_id` associated to each patient.
     """
+
+    print('+' * 80, flush=True)
+    print('Preparing the data', flush=True)
+    print('-' * 80, flush=True)
+
+    print('    Loading data from MIMIC-Extract pipeline...')
 
     # the next two MIMIC-Extract pipeline dataframes are needed to reproduce the paper
     patients_df = pd.read_hdf(mimic_extract_filename, 'patients')
     vitals_labs_mean_df = pd.read_hdf(mimic_extract_filename, 'vitals_labs_mean')
 
-    # MIMIC-Extract pipeline does not provide the features `timecmo_chart` and `sapsii` that
-    # are needed to reproduce the paper code; we need to fetch them from a MIMIC PostgreSQL
-    # database inside the concept tables `code_status` and `sapsii` or the CSV files
-    # 'code_status.csv' and 'sapsii.csv' and add them to the `patients_df` dataframe
-    if (mimic_sqlalchemy_db_uri != ''):
-        code_status_df = pd.read_sql_table('code_status', mimic_sqlalchemy_db_uri)
-        sapsii_df = pd.read_sql_table('sapsii', mimic_sqlalchemy_db_uri)
-    else:
-        code_status_df = pd.read_csv(f'{mimic_data_folder}code_status.csv')
-        sapsii_df = pd.read_csv(f'{mimic_data_folder}sapsii.csv')
-    code_status_df.set_index(['subject_id', 'hadm_id', 'icustay_id'], inplace=True)
-    sapsii_df.set_index(['subject_id', 'hadm_id', 'icustay_id'], inplace=True)
-    code_status_df['timecmo_chart'] = pd.to_datetime(code_status_df['timecmo_chart'])
-    patients_df = pd.merge(patients_df, code_status_df['timecmo_chart'], left_index=True, right_index=True)
+    # paper considers the following static variables (per patient)
+    static_df = patients_df[['first_careunit', 'intime', 'deathtime', 'dischtime', 'gender', 'age', 'ethnicity']]
 
-    # calculate SAPS-II score quartile and add it to `patients_df`
-    _, bins = pd.qcut(sapsii_df.sapsii, 4, retbins=True, labels=False)
-    sapsii_df['sapsii_quartile'] = pd.cut(sapsii_df.sapsii, bins=bins, labels=False, include_lowest=True)
-    patients_df = pd.merge(patients_df, sapsii_df['sapsii_quartile'], left_index=True, right_index=True)
-
-    #-----------------------------------------------------------------------------
-    # paper considers in-hospital mortality as any of these three events:
-    #  1) Death = `deathtime` feature if not null
-    #  2) A note of "Do Not Resuscitate" (DNR) = `dnr_first_charttime` if not null
-    #  3) A note of "Comfort Measures Only" (CMO) = `timecmo_chart` if not null
-    # earliest time of the three events is considered the mortality time
-    # `mort_time` for all experiments described in the paper
-    patients_df['morttime'] = patients_df[['deathtime', 'dnr_first_charttime', 'timecmo_chart']].min(axis=1)
-    # `mort_flag` is True if patient dies in hospital or False if not
-    # this flag will be used as our prediction label (`Y`)
-    patients_df['mort_flag'] = np.where(patients_df['morttime'].isnull(), False, True)
-
-    # calculate hours elapsed between patient admitted into the ICU
-    # and same patient being discharged from the hospital
-    # (this is called period of stay in the paper)
-    patients_df['hours_in_icu'] = patients_df['dischtime'] - patients_df['intime']
-    patients_df['hours_in_icu'] = patients_df['hours_in_icu'].apply(lambda x: x.total_seconds() / 3600)
-
-    # calculate hours elapsed between patient admitted into the ICU
-    # and same patient dying (or reaching either DNR or CMO condition)
-    patients_df['hours_until_mort'] = patients_df['morttime'] - patients_df['intime']
-    patients_df['hours_until_mort'] = patients_df['hours_until_mort'].apply(lambda x: x.total_seconds() / 3600)
-
-    # exclusion criteria 1: remove patients with a period of stay lower than `cutoff_hours` (e.g. first 24 hours)
-    patients_df = patients_df[patients_df['hours_in_icu'] >= cutoff_hours]
-
-    # exclusion criteria 2: remove patients that died in the period of stay or the gap period (e.g. first 24+12 hours)
-    patients_df = patients_df[patients_df['hours_in_icu'] >= cutoff_hours + gap_hours]
-
-    #--------------------------------------
-    # Time to switch to physiological data!
-
-    # paper considers the following 29 vitals and labs 
+    # paper considers 29 vitals and labs (time-varying series)
     vitals_labs_to_keep_list = [
         'anion gap',
         'bicarbonate',
@@ -435,83 +426,125 @@ def prepare_data(mimic_extract_filename='../data/all_hourly_data.h5',
         'white blood cell count',
         'ph'
     ]
+    X = vitals_labs_mean_df[vitals_labs_to_keep_list]
+    X = X.droplevel(1, axis=1).reset_index()
+    # Note: X at this point in time contains only the physiological data (no static data)
 
-    # subset MIMIC-Extract data to the list of vitals/labs used in the paper
-    vitals_labs_df = vitals_labs_mean_df[vitals_labs_to_keep_list]
+    # add SAPS II score to static dataframe
+    print('    Adding SAPS II score to static dataset...', flush=True)
+    sapsii_df = pd.read_csv(f'{mimic_data_folder}sapsii.csv')
+    _, bins = pd.qcut(sapsii_df.sapsii, 4, retbins=True, labels=False)
+    sapsii_df['sapsii_quartile'] = pd.cut(sapsii_df.sapsii, bins=bins, labels=False, include_lowest=True)
+    sapsii_df = sapsii_df[['subject_id', 'hadm_id', 'icustay_id', 'sapsii_quartile']]
+    static_df = pd.merge(static_df, sapsii_df, how='left', on=['subject_id', 'hadm_id', 'icustay_id'])
 
-    # let's discretize the physiological features by:
-    #  1) Converting them into z-scores
-    #  2) Rounding the resulting z-scores to integers and clipping them to [-4, 4]
-    #  3) Replacing z-scores with value 9 if they are NaN
-    #  4) Dummifying the resulting columns and removing the NaN columns (those whose names end in '_9')
+    # add mortality outcome which in this paper is not just death, but CMO (Comfort Measures Only) too:
+    #  - `mort_hosp_valid` which is a flag (True: patient died, False: patient alive)
+    #  - `min_mort_time` which is the minimum timestamp of deathtime, the CMO note, or the DNR (Do Not Resuscitate) note.
+    print('    Adding mortality columns to static dataset...', flush=True)
+    deathtimes_df = static_df[['subject_id', 'hadm_id', 'icustay_id', 'deathtime', 'dischtime']].dropna()
+    deathtimes_valid_df = deathtimes_df[deathtimes_df.dischtime >= deathtimes_df.deathtime].copy()
+    deathtimes_valid_df.loc[:, 'mort_hosp_valid'] = True
+    cmo_df = pd.read_csv(f'{mimic_data_folder}code_status.csv')
+    cmo_df = cmo_df[cmo_df.cmo > 0]  # only keep those patients with a CMO note
+    cmo_df['dnr_first_charttime'] = pd.to_datetime(cmo_df.dnr_first_charttime)
+    cmo_df['timecmo_chart'] = pd.to_datetime(cmo_df.timecmo_chart)
+    cmo_df['cmo_df_min_time'] = cmo_df.loc[:, ['dnr_first_charttime', 'timecmo_chart']].min(axis=1)
+    all_mort_times_df = pd.merge(deathtimes_valid_df, cmo_df, on=['subject_id', 'hadm_id', 'icustay_id'], how='outer') \
+        [['subject_id', 'hadm_id', 'icustay_id', 'deathtime', 'dischtime', 'cmo_df_min_time']]
+    all_mort_times_df['deathtime'] = pd.to_datetime(all_mort_times_df.deathtime)
+    all_mort_times_df['cmo_df_min_time'] = pd.to_datetime(all_mort_times_df.cmo_df_min_time)
+    all_mort_times_df['min_mort_time'] = all_mort_times_df.loc[:, ['deathtime', 'cmo_df_min_time']].min(axis=1)
+    min_mort_time_df = all_mort_times_df[['subject_id', 'hadm_id', 'icustay_id', 'min_mort_time']]
+    static_df = pd.merge(static_df, min_mort_time_df, on=['subject_id', 'hadm_id', 'icustay_id'], how='left')
+    static_df['mort_hosp_valid'] = np.invert(np.isnat(static_df.min_mort_time))
 
-    # create two dictionaries of mean and standard deviation values by vital/lab
-    # since these dictionaries will be used to calculate the z-scores next
-    mean_dict = vitals_labs_df.groupby(['subject_id']).mean().mean().to_dict()
-    stdev_dict = vitals_labs_df.std().to_dict()
+    # only keep patients that stayed alive after at least `cutoff_hours` hours in the ICU
+    # or died after `cutoff hours` + `gap hours` hours, e.g., 36 hours
+    static_df['time_til_mort'] = pd.to_datetime(static_df.min_mort_time) - pd.to_datetime(static_df.intime)
+    static_df['time_til_mort'] = static_df.time_til_mort.apply(lambda x: x.total_seconds() / 3600)
+    static_df['time_in_icu'] = pd.to_datetime(static_df.dischtime) - pd.to_datetime(static_df.intime)
+    static_df['time_in_icu'] = static_df.time_in_icu.apply(lambda x: x.total_seconds() / 3600)
+    static_df = static_df[((static_df.time_in_icu >= cutoff_hours) & (static_df.mort_hosp_valid == False)) 
+                          | (static_df.time_til_mort >= cutoff_hours + gap_hours)]
 
-    # convert values for every vital/lab into z-scores rounded to the nearest integer,
-    # clipped between [-4, 4], and replaced with 9 if NaN
-    vitals_labs_df = vitals_labs_df.apply(lambda x: transform_into_zscores(x, mean_dict, stdev_dict), axis=0)
+    # make discrete values and keep only `cutoff_hours` hours of records
+    INDEX_COLS = ['subject_id', 'icustay_id', 'hours_in', 'hadm_id']
+    print('    Discretizing X...', flush=True)
+    print(f'        X.shape: {X.shape}, X.subject_id.nunique(): {X.subject_id.nunique()}')
+    normal_dict = X.groupby(['subject_id']).mean().mean().to_dict()
+    std_dict = X.std().to_dict()
+    feature_cols = X.columns[len(INDEX_COLS):]
+    X_words = X.loc[:, feature_cols].apply(lambda x: transform_into_zscores(x, normal_dict, std_dict), axis=0)
+    X.loc[:, feature_cols] = X_words
+    X_discrete = pd.get_dummies(X, columns=X.columns[len(INDEX_COLS):])
+    na_columns = [col for col in X_discrete.columns if '_9' in col]
+    X_discrete.drop(na_columns, axis=1, inplace=True)
+    print(f'        X_discrete.shape: {X_discrete.shape}, X_discrete.subject_id.nunique(): {X_discrete.subject_id.nunique()}')
+    print(f'    Keep only X_discrete[X_discrete.hours_in < {cutoff_hours}]...')
+    X_discrete = X_discrete[X_discrete.hours_in < cutoff_hours]
+    X_discrete = X_discrete[[c for c in X_discrete.columns if c not in ['hadm_id', 'icustay_id']]]
+    print(f'        New X_discrete.shape: {X_discrete.shape}, new X_discrete.subject_id.nunique(): {X_discrete.subject_id.nunique()}')
 
-    # dummify all columns
-    vitals_labs_df = pd.get_dummies(vitals_labs_df, columns=vitals_labs_df.columns)
+    # pad patients whose records stopped early
+    print(f'    Padding patients with less than {cutoff_hours} hours of data...', flush=True)
+    X_discrete_indexed = X_discrete.set_index(['subject_id', 'hours_in'])
+    extra_hours = X_discrete_indexed.groupby(level=0).apply(hours_to_pad, cutoff_hours)
+    extra_hours = extra_hours[extra_hours != -1].reset_index()
+    extra_hours.columns = ['subject_id', 'pad_hrs']
+    pad_tuples = []
+    for s in extra_hours.subject_id:
+        for hr in list(extra_hours[extra_hours.subject_id == s].pad_hrs)[0]:
+            pad_tuples.append((s, hr))
+    pad_df = pd.DataFrame(0, index=pd.MultiIndex.from_tuples(pad_tuples, names=('subject_id', 'hours_in')), columns=X_discrete_indexed.columns)
+    X_discrete_indexed_padded = pd.concat([X_discrete_indexed, pad_df], axis=0)
 
-    # remove NaN columns (those ending in '_9')
-    nan_columns = [column for column in vitals_labs_df.columns if '_9' in column]
-    vitals_labs_df.drop(nan_columns, axis=1, inplace=True)
+    # get the static vars we need, and discretize them
+    static_to_keep_df = static_df[['subject_id', 'gender', 'age', 'ethnicity', 'sapsii_quartile', 'first_careunit', 'mort_hosp_valid']].copy()
+    static_to_keep_df.loc[:, 'ethnicity'] = static_to_keep_df['ethnicity'].apply(categorize_ethnicity)
+    static_to_keep_df.loc[:, 'age'] = static_to_keep_df['age'].apply(categorize_age)
+    static_to_keep_df = pd.get_dummies(static_to_keep_df, columns=['gender', 'age', 'ethnicity'])
 
-    # just keep `cutoff_hours` hours of data (e.g. 24 hours)
-    vitals_labs_df = vitals_labs_df.query(f'hours_in < {cutoff_hours}')
+    # merge the physiological data with the static data
+    print('    Merging dataframes to create X_full...', flush=True)
+    X_full = pd.merge(X_discrete_indexed_padded.reset_index(), static_to_keep_df, on='subject_id', how='inner')
+    X_full = X_full.set_index(['subject_id', 'hours_in'])
 
-    vitals_labs_df.reset_index(['hadm_id', 'icustay_id'], drop=True, inplace=True)
+    # print mortality per careunit
+    print('    Mortality per careunit...', flush=True)
+    mort_by_careunit = X_full.groupby('subject_id')[['first_careunit', 'mort_hosp_valid']].first()
+    for cu in mort_by_careunit.first_careunit.unique():
+        print(' ' * 8 + cu + ": " + str(np.sum(mort_by_careunit[mort_by_careunit.first_careunit == cu].mort_hosp_valid)) + ' out of ' + str(
+            len(mort_by_careunit[mort_by_careunit.first_careunit == cu])))
 
-    # pad patients whose records stopped earlier than `cutoff_hours` with zeroes
-    pad_hours_df = vitals_labs_df.groupby(level=0).apply(hours_to_pad, cutoff_hours)
-    pad_hours_df = pad_hours_df[pad_hours_df != -1].reset_index()
-    pad_hours_df.columns = ['subject_id', 'pad_hours']
-    padding_list_of_tuples = []
-    for subject_id in pad_hours_df.subject_id:
-        for hour in list(pad_hours_df[pad_hours_df.subject_id == subject_id].pad_hours)[0]:
-            padding_list_of_tuples.append((subject_id, hour))
-    pad_hours_df_idx = pd.MultiIndex.from_tuples(padding_list_of_tuples, names=('subject_id', 'hours_in'))
-    pad_hours_df = pd.DataFrame(0, pad_hours_df_idx, columns=vitals_labs_df.columns)
-    vitals_labs_df = pd.concat([vitals_labs_df, pad_hours_df], axis=0)
-    # after padding, now we have a dataframe with number of patients times `cutoff_hours` records!
+    # create Y and cohort matrices
+    subject_ids = X_full.index.get_level_values(0).unique()
+    Y = X_full[['mort_hosp_valid']].groupby(level=0).max()
+    careunits = X_full[['first_careunit']].groupby(level=0).first()
+    sapsii_quartile = X_full[['sapsii_quartile']].groupby(level=0).max()
+    Y = Y.reindex(subject_ids)
+    careunits = np.squeeze(careunits.reindex(subject_ids).to_numpy())
+    sapsii_quartile = np.squeeze(sapsii_quartile.reindex(subject_ids).to_numpy())
 
-    # select, categorize, and dummify the three static variables
-    # selected by the paper: gender, age, and ethnicity
-    static_df = patients_df[['gender', 'age', 'ethnicity', 'mort_flag']]. \
-        reset_index(['hadm_id', 'icustay_id'], drop=True)
-    static_df['ethnicity'] = static_df['ethnicity'].apply(categorize_ethnicity)
-    static_df['age'] = static_df['age'].apply(categorize_age)
-    static_df = pd.get_dummies(static_df, columns=['gender', 'age', 'ethnicity'])
+    # remove unwanted columns from X matrix
+    X_full = X_full.loc[:, X_full.columns != 'mort_hosp_valid']
+    X_full = X_full.loc[:, X_full.columns != 'sapsii_quartile']
+    X_full = X_full.loc[:, X_full.columns != 'first_careunit']
+    
+    feature_names = X_full.columns
 
-    # merge static data and physiological data to get the X and Y dataframes
-    # X dataframe has dimensions P x T x F where:
-    #  P is number of patients (subject_id)
-    #  T is number of timesteps (hours_in); e.g. 24 for 24 hours
-    #  F is number of features (3 static + 29 vitals/labs before being bucketized/dummified = 232 after processing)
-    X_df = pd.merge(static_df, vitals_labs_df, left_index=True, right_index=True)
-    Y_df = X_df[['mort_flag']].groupby(level=0).max()
+    # get the data as a np matrix of size num_examples x timesteps x features
+    X_full_matrix = np.reshape(X_full.to_numpy(), (len(subject_ids), cutoff_hours, -1))
+    print(f'    Final shape of X: {X_full_matrix.shape}')
 
-    # convert X and Y dataframes to NumPy arrays
-    # X will be shaped into a NumPy array of shape (P, T, F)
-    X = X_df.loc[:, X_df.columns != 'mort_flag'].to_numpy(dtype=int)
-    X = np.reshape(X, (len(Y_df), cutoff_hours, -1))
-    # Y will be shaped into a NumPy vector of shape (P,)
-    Y = np.squeeze(Y_df.to_numpy(dtype=int), axis=1)
+    print(f"    Number of positive samples: {np.sum(np.squeeze(Y.to_numpy()))}")
 
-    # create cohort vectors of shape (P, 1)
-    cohort_careunits_df = patients_df[['first_careunit']]. \
-        reset_index(['hadm_id', 'icustay_id'], drop=True).groupby(level=0).first()
-    cohort_careunits = np.squeeze(cohort_careunits_df.to_numpy(), axis=1)
-    cohort_sapsii_quartile_df = patients_df[['sapsii_quartile']]. \
-        reset_index(['hadm_id', 'icustay_id'], drop=True).groupby(level=0).max()
-    cohort_sapsii_quartile = np.squeeze(cohort_sapsii_quartile_df.to_numpy(), axis=1)
-    subject_ids = Y_df.index.get_level_values(0).to_numpy()
+    X = X_full_matrix
+    Y = np.squeeze(Y.to_numpy())
 
-    return X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids
+    print('    Done!', flush=True)
+
+    return X, Y, careunits, sapsii_quartile, subject_ids
 
 def stratified_split(X, Y, cohorts, train_val_random_seed=0):
     """ 
@@ -608,11 +641,11 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
         Array indicating cohort membership for each patient.
     """
 
-    X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
+    X, Y, careunits, sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
 
     # Do train/validation/test split using careunits as the cohort classifier
     X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test = \
-        stratified_split(X, Y, cohort_careunits, train_val_random_seed=train_val_random_seed)
+        stratified_split(X, Y, careunits, train_val_random_seed=train_val_random_seed)
 
     num_timesteps = X_train.shape[1]  # number of timesteps (T), e.g., 24 hours
     num_features = X_train.shape[2]   # number of features (F), e.g., 232
@@ -641,30 +674,30 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
     early_stopping = EarlyStopping(monitor='val_loss', patience=3)
 
     # fit (train) the LSTM autoencoder model
-    print("Training LSTM autoencoder started...")
+    print('Training LSTM autoencoder started...')
     lstm_autoencoder.fit(X_train, X_train,
         epochs=epochs,
         batch_size=128,
         shuffle=True,
         callbacks=[early_stopping],
         validation_data=(X_val, X_val))
-    print("LSTM autoencoder trained!")
+    print('LSTM autoencoder trained!')
 
     # now that the LSTM autoencoder model is trained
     # the corresponding encoder is trained as well
     # and we can use it to encode X
     embeddings_X_train = encoder.predict(X_train)
     embeddings_X = encoder.predict(X)
-    print(f"Patient embeddings created! Shape: {embeddings_X.shape}")
+    print(f'Patient embeddings created! Shape: {embeddings_X.shape}')
 
     # With the embeddings now we can fit a Gaussian Mixture Model
-    print("Training Gaussian Mixture Model...")
+    print('Training Gaussian Mixture Model...')
     gmm = GaussianMixture(n_components=num_clusters, tol=gmm_tol, verbose=True)
     gmm.fit(embeddings_X_train)
 
     # Finally, we can calculate the cluster membership
     cohort_unsupervised = gmm.predict(embeddings_X)
-    print(f"Gaussian Mixture Model applied to embeddings! Results shape: {cohort_unsupervised.shape}")
+    print(f'Gaussian Mixture Model applied to embeddings! Results shape: {cohort_unsupervised.shape}')
 
     # Let's save the cluster results
     np.save(cohort_unsupervised_filename, cohort_unsupervised)
@@ -705,13 +738,14 @@ def create_single_task_learning_model(lstm_layer_size, input_dims, output_dims, 
 
     return model
 
-def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hours=12,
+def run_mortality_prediction_task(model_type='global',
+                                  cutoff_hours=24, gap_hours=12,
                                   save_to_folder='../data/',
                                   cohort_criteria_to_select='careunits',
                                   train_val_random_seed=0,
                                   cohort_unsupervised_filename='../data/unsupervised_clusters.npy',
                                   lstm_layer_size=16,
-                                  epochs=100, learning_rate=0.0001,
+                                  epochs=30, learning_rate=0.0001,
                                   use_cohort_inv_freq_weights=False):
     """
     Runs the in-hospital mortality prediction task using one of the three models specified in the
@@ -758,17 +792,23 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
         if not os.path.exists(os.path.join(save_to_folder, folder)):
             os.makedirs(os.path.join(save_to_folder, folder))
 
-    X, Y, cohort_careunits, cohort_sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
+    X, Y, careunits, sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
+    Y = Y.astype(int) # Y is originally a boolean
+
+    print('+' * 80, flush=True)
+    print('Running the Mortality Prediction Task', flush=True)
+    print('-' * 80, flush=True)
 
     # fetch right cohort criteria
     if cohort_criteria_to_select == 'careunits':
-        cohort_criteria = cohort_careunits
+        cohort_criteria = careunits
     elif cohort_criteria_to_select == 'sapsii_quartile':
-        cohort_criteria = cohort_sapsii_quartile
+        cohort_criteria = sapsii_quartile
     elif cohort_criteria_to_select == 'unsupervised':
         cohort_criteria = np.load(f"{cohort_unsupervised_filename}")
 
     # Do train/validation/test split using `cohort_criteria` as the cohort classifier
+    print('    Splitting data into train/validation/test sets...', flush=True)
     X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test = \
         stratified_split(X, Y, cohort_criteria, train_val_random_seed=train_val_random_seed)
 
@@ -777,11 +817,11 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
 
     # calculate number of samples per cohort and its reciprocal
     # (to be used in sample weight calculation)
-    print(">> Calculating number of training samples in cohort...")
-    task_weights = {}    
+    print('    Calculating number of training samples in cohort...', flush=True)
+    task_weights = {}
     for cohort in tasks:
         num_samples_in_cohort = len(np.where(cohorts_train == cohort)[0])
-        print(f"# of patients in cohort {cohort} is {str(num_samples_in_cohort)}")
+        print(f"        # of patients in cohort {cohort} is {str(num_samples_in_cohort)}")
         task_weights[cohort] = len(X_train) / num_samples_in_cohort
 
     sample_weight = None
@@ -790,13 +830,14 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
         sample_weight = np.array([task_weights[cohort] for cohort in cohorts_train])
 
     model_filename = f"{save_to_folder}models/model_{cutoff_hours}+{gap_hours}_{cohort_criteria_to_select}"
+    results_filename = f'{save_to_folder}results/model_{cutoff_hours}+{gap_hours}_{cohort_criteria_to_select}.h5'
 
     if model_type == 'global':
         #-----------------------
         # train the global model
 
-        print("+" * 80)
-        print(f">> Training '{model_type}' model...")
+        print('    ' + '~' * 76)
+        print(f"    Training '{model_type}' model...")
 
         model = create_single_task_learning_model(lstm_layer_size=lstm_layer_size, input_dims=X_train.shape[1:],
                                                   output_dims=1, learning_rate=learning_rate)
@@ -808,23 +849,29 @@ def run_mortality_prediction_task(model_type='global', cutoff_hours=24, gap_hour
                   callbacks=[early_stopping], validation_data=(X_val, y_val))
         model.save(model_filename)
 
-        print("+" * 80)
-        print(f">> Predicting using '{model_type}' model...")
+        print('    ' + '~' * 76)
+        print(f"    Predicting using '{model_type}' model...", flush=True)
         y_pred = model.predict(X_test)
 
-        df_metrics = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']))
+        metrics_df = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']))
 
         # calculate AUC for every cohort
         lst_of_auc = []
         for task in tasks:
             auc = roc_auc_score(y_test[cohorts_test == task], y_pred[cohorts_test == task])
             lst_of_auc.append(auc)
-            df_metrics.loc[task, 'AUC'] = auc
+            metrics_df.loc[task, 'AUC'] = auc
 
         # calculate macro AUC
-        df_metrics.loc['Macro', 'AUC'] = np.nanmean(np.array(lst_of_auc), axis=0)
+        metrics_df.loc['Macro', 'AUC'] = np.nanmean(np.array(lst_of_auc), axis=0)
 
         # calculate micro AUC
-        df_metrics.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_pred)
+        metrics_df.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_pred)
 
-        return df_metrics
+        # save results
+        metrics_df.to_hdf(results_filename, key='metrics', mode='w')
+
+    print(f"    Done!", flush=True)
+
+    return metrics_df
+
