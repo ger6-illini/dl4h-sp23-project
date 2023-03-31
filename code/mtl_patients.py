@@ -10,6 +10,7 @@ from keras.optimizers import Adam
 from sklearn.metrics import roc_auc_score, precision_score, recall_score
 from sklearn.mixture import GaussianMixture
 from sklearn.model_selection import train_test_split
+from tqdm.autonotebook import tqdm
 
 def transform_into_zscores(x, mean_dict, stdev_dict):
     """ 
@@ -707,6 +708,118 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
 
     return cohort_unsupervised
 
+def set_global_determinism(seed):
+    """
+    Sets deterministic behavior for TensorFlow, Keras, and NumPy using the given seed `seed` (an integer).
+    """
+
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    tf.random.set_seed(seed)
+    np.random.seed(seed)
+
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+    
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+
+def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_bootstrap_samples=100):
+    """ 
+    Evaluates model on each of the `num_bootstrap_samples` sets. 
+
+    Parameters
+    ----------
+    X_test : NumPy array of integers
+        Subset of X matrix to be used for test.
+    y_test : NumPy vector of integers
+        Subset of Y vector corresponding to X_test.
+    cohorts_test : NumPy vector of integers
+        Subset of cohort vector corresponding to X_test.
+    task : String or Int
+        Task to evaluate on or 'all' to evaluate the entire dataset.
+    model : TensorFlow model
+        The model that needs to be evaluated.
+    tasks : List of strings, default [] (empty list)
+        List of the tasks (used for evaluating multitask model).
+    num_bootstrapped_samples : int, default 100
+        Number of bootstrapped samples.
+
+    Returns
+    -------
+    all_auc : NumPy array of floats
+        Array of AUC value for sample set.
+    """
+
+    print(f'    Bootstrap prediction for task "{task}"...')
+
+    # Original arrays split by class. Bootstrap indices will refer to them!
+    positive_X = X_test[np.where(y_test == 1)]  # array with all positive X samples in test dataset
+    negative_X = X_test[np.where(y_test == 0)]  # array with all negative X samples in test dataset
+    positive_cohorts = cohorts_test[np.where(y_test == 1)]  # array with all positive cohort samples in test dataset
+    negative_cohorts = cohorts_test[np.where(y_test == 0)]  # array with all negative cohort samples in test dataset
+    positive_y = y_test[np.where(y_test == 1)]  # array with all positive y samples in test dataset
+    negative_y = y_test[np.where(y_test == 0)]  # array with all negative y samples in test dataset
+
+    # Generates sets of indices for test bootstrapping.
+    # Number of positive and negative samples in resulting set will be same as in the original data set.
+    # This was part of the `generate_bootstrap_indices()` function in author's code.
+    all_pos_samples_idx = []  # will hold random indices of positive samples 
+    all_neg_samples_idx = []  # will hold random indices of positive samples 
+    for i in range(num_bootstrap_samples):
+        pos_samples_idx = np.random.choice(len(positive_X), replace=True, size=len(positive_X))
+        neg_samples_idx = np.random.choice(len(negative_X), replace=True, size=len(negative_X))
+        all_pos_samples_idx.append(pos_samples_idx)
+        all_neg_samples_idx.append(neg_samples_idx)
+    # now we have `num_bootstrap_samples` sets of positive samples
+    # and `num_bootstrap_samples` sets of negative samples
+
+    # arrays to store resulting metrics for each bootstrap sample set of `num_bootstrap_samples`
+    all_auc = []
+    all_ppv = []
+    all_specificity = []
+
+    for i in tqdm(range(num_bootstrap_samples)):
+        # build one complete set of bootstrapped samples
+        pos_samples_idx = all_pos_samples_idx[i]
+        neg_samples_idx = all_neg_samples_idx[i]
+        positive_X_bootstrapped = positive_X[pos_samples_idx]
+        negative_X_bootstrapped = negative_X[neg_samples_idx]
+        X_bootstrap_sample = np.concatenate((positive_X_bootstrapped, negative_X_bootstrapped))
+        y_bootstrap_sample = np.concatenate((positive_y[pos_samples_idx], negative_y[neg_samples_idx]))
+        cohorts_bootstrap_sample = np.concatenate((positive_cohorts[pos_samples_idx], negative_cohorts[neg_samples_idx]))
+
+        # 'all' is used when micro calculations are needed
+        if task != 'all':
+            X_bootstrap_sample_task = X_bootstrap_sample[cohorts_bootstrap_sample == task]
+            y_bootstrap_sample_task = y_bootstrap_sample[cohorts_bootstrap_sample == task]
+            cohorts_bootstrap_sample_task = cohorts_bootstrap_sample[cohorts_bootstrap_sample == task]
+        else:
+            X_bootstrap_sample_task = X_bootstrap_sample
+            y_bootstrap_sample_task = y_bootstrap_sample
+            cohorts_bootstrap_sample_task = cohorts_bootstrap_sample
+
+        # run prediction for the bootstrap sample
+        y_scores = model.predict(X_bootstrap_sample_task, batch_size=128, verbose=0)
+        y_pred = (y_scores > 0.5).astype("int32")
+        if len(y_scores) < len(y_bootstrap_sample_task):
+            y_scores = get_correct_task_mtl_outputs(y_scores, cohorts_bootstrap_sample_task, tasks)
+            y_pred = get_correct_task_mtl_outputs(y_pred, cohorts_bootstrap_sample_task, tasks)
+
+        # calculate AUC and store in array
+        try:
+            auc = roc_auc_score(y_bootstrap_sample_task, y_scores)
+            all_auc.append(auc)
+            ppv = precision_score(y_bootstrap_sample_task, y_pred)
+            all_ppv.append(ppv)
+            specificity = recall_score(y_bootstrap_sample_task, y_pred, pos_label=0)
+            all_specificity.append(specificity)
+        except Exception as e:
+            print(f'        Skipped this sample: {e}.')
+        # we should have by now `num_bootstrap_samples` AUC values
+
+    return all_auc, all_ppv, all_specificity
+
 def create_single_task_learning_model(lstm_layer_size, input_dims, output_dims, learning_rate):
     """
     Creates a single task learning (STL) model with one LSTM layer followed by one output dense layer (sigmoided).
@@ -736,112 +849,115 @@ def create_single_task_learning_model(lstm_layer_size, input_dims, output_dims, 
     # add output (dense) layer to the  model
     model.add(Dense(units=output_dims, activation='sigmoid'))
 
-    model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0001), metrics=['accuracy'])
+    model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=learning_rate), metrics=['accuracy'])
 
     return model
 
-def set_global_determinism(seed):
-    """
-    Sets deterministic behavior for TensorFlow, Keras, and NumPy using the given seed `seed` (an integer).
-    """
-
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed)
-    tf.random.set_seed(seed)
-    np.random.seed(seed)
-
-    os.environ['TF_DETERMINISTIC_OPS'] = '1'
-    os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
-    
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-
-def bootstrap_predict(X_test, y_test, cohorts_test, task, model, all_tasks=[], num_bootstrap_samples=100):
+def get_mtl_sample_weights(y, cohorts, all_tasks, sample_weights=None):
     """ 
-    Evaluates model on each of the `num_bootstrap_samples` sets. 
+    Generates a dictionary of sample weights for the multitask model that masks out 
+    (and prevents training on) outputs corresponding to cohorts to which a given sample doesn't belong. 
 
     Parameters
     ----------
-    X_test : NumPy array of integers
-        Subset of X matrix to be used for test.
-    y_test : NumPy vector of integers
-        Subset of Y vector corresponding to X_test.
-    cohorts_test : NumPy vector of integers
-        Subset of cohort vector corresponding to X_test.
-    task : String or Int
-        Task to evaluate on or 'all' to evaluate the entire dataset.
-    model : TensorFlow model
-        The model that needs to be evaluated.
-    tasks : List of strings
-        List of the tasks (used for evaluating multitask model).
-    num_bootstrapped_samples : int, default 100
-        Number of bootstrapped samples.
+    y : NumPy array
+        y matrix.
+    cohorts : NumPy array
+        Cohort membership corresponding to each example, in the same order as y.
+    all_tasks : List
+        List of all unique tasks.
+    sample_weight : NumPy array
+        If samples should be weighted differently during training, provide a list with len == num_samples
+        where each value is how much that value should be weighted.
 
     Returns
     -------
-    all_auc : NumPy array of floats
-        Array of AUC value for sample set.
+    sample_weight_dict : Dictionary
+        Dictionary mapping task to list w len == num_samples, where each value is 0 if 
+        the corresponding example does not belong to that task, and either 1 or a sample weight
+        value (if sample_weight != None) if it does.
     """
 
-    all_auc = []
+    sample_weight_dict = {}
+    for task in all_tasks:
+        task_indicator_col = (cohorts == task).astype(int)
+        if sample_weights:
+            task_indicator_col = np.array(task_indicator_col) * np.array(sample_weights)
+        sample_weight_dict[task] = task_indicator_col
 
-    print(f'    Bootstrap prediction for task "{task}"...')
+    return sample_weight_dict
 
-    # Original arrays split by class. Bootstrap indices will refer to them!
-    positive_X = X_test[np.where(y_test == 1)]  # array with all positive X samples in test dataset
-    negative_X = X_test[np.where(y_test == 0)]  # array with all negative X samples in test dataset
-    positive_cohorts = cohorts_test[np.where(y_test == 1)]  # array with all positive cohort samples in test dataset
-    negative_cohorts = cohorts_test[np.where(y_test == 0)]  # array with all negative cohort samples in test dataset
-    positive_y = y_test[np.where(y_test == 1)]  # array with all positive y samples in test dataset
-    negative_y = y_test[np.where(y_test == 0)]  # array with all negative y samples in test dataset
+def get_correct_task_mtl_outputs(mtl_output, cohorts, tasks):
+    """ 
+    Gets the output corresponding to the right task given the multitask output.  Necessary since 
+    the MTL model will produce an output for each cohort's output, but we only care about the one the example
+    actually belongs to.
 
-    # Generates sets of indices for test bootstrapping.
-    # Number of positive and negative samples in resulting set will be same as in the original data set.
-    # This was part of the `generate_bootstrap_indices()` function in author's code.
-    all_pos_samples_idx = []  # will hold random indices of positive samples 
-    all_neg_samples_idx = []  # will hold random indices of positive samples 
-    for i in range(num_bootstrap_samples):
-        pos_samples_idx = np.random.choice(len(positive_X), replace=True, size=len(positive_X))
-        neg_samples_idx = np.random.choice(len(negative_X), replace=True, size=len(negative_X))
-        all_pos_samples_idx.append(pos_samples_idx)
-        all_neg_samples_idx.append(neg_samples_idx)
-    # now we have `num_bootstrap_samples` sets of positive samples
-    # and `num_bootstrap_samples` sets of negative samples
+    Parameters
+    ---------- 
+    mtl_output : NumPy array
+        The output of the multitask model. Should be of size n_tasks x n_samples.
+    cohorts : NumPy array
+        List of cohort membership for each sample.
+    tasks : List of int or str
+        Unique list of tasks (should be in the same order that corresponds with that of the MTL model output.)
 
-    for i in range(num_bootstrap_samples):
-        # build one complete set of bootstrapped samples
-        pos_samples_idx = all_pos_samples_idx[i]
-        neg_samples_idx = all_neg_samples_idx[i]
-        positive_X_bootstrapped = positive_X[pos_samples_idx]
-        negative_X_bootstrapped = negative_X[neg_samples_idx]
-        X_bootstrap_sample = np.concatenate((positive_X_bootstrapped, negative_X_bootstrapped))
-        y_bootstrap_sample = np.concatenate((positive_y[pos_samples_idx], negative_y[neg_samples_idx]))
-        cohorts_bootstrap_sample = np.concatenate((positive_cohorts[pos_samples_idx], negative_cohorts[neg_samples_idx]))
+    Returns
+    -------
+    mtl_output : NumPy array
+        An array of size num_samples x 1 where each value corresponds to the MTL model's
+        prediction for the task that that sample belongs to.
+    """
 
-        # 'all' is used when micro calculations are needed
-        if task != 'all':
-            X_bootstrap_sample_task = X_bootstrap_sample[cohorts_bootstrap_sample == task]
-            y_bootstrap_sample_task = y_bootstrap_sample[cohorts_bootstrap_sample == task]
-            cohorts_bootstrap_sample_task = cohorts_bootstrap_sample[cohorts_bootstrap_sample == task]
-        else:
-            X_bootstrap_sample_task = X_bootstrap_sample
-            y_bootstrap_sample_task = y_bootstrap_sample
-            cohorts_bootstrap_sample_task = cohorts_bootstrap_sample
+    n_tasks = len(tasks)
+    cohort_key = dict(zip(tasks, range(n_tasks)))
+    mtl_output = np.array(mtl_output)
+    mtl_output = mtl_output[[cohort_key[c] for c in cohorts], np.arange(len(cohorts))]
 
-        # run prediction for the bootstrap sample
-        preds = model.predict(X_bootstrap_sample_task, batch_size=128, verbose=0)
-        # if len(preds) < len(y_bootstrap_sample_task):
-        #     preds = get_correct_task_mtl_outputs(preds, cohorts_bootstrap_sample_task, all_tasks)
+    return mtl_output
 
-        # calculate AUC and store in array
-        try:
-            auc = roc_auc_score(y_bootstrap_sample_task, preds)
-            all_auc.append(auc)
-        except Exception as e:
-            print(f'        Skipped this sample: {e}.')
-        # we should have by now `num_bootstrap_samples` AUC values
+def create_multitask_learning_model(lstm_layer_size, input_dims, output_dims, tasks, learning_rate):
+    """
+    Creates a multitask learning (MTL) model with one LSTM layer followed by one output dense layer (sigmoided).
 
-    return all_auc
+    Parameters
+    ----------
+    lstm_layer_size : int
+        Number of units in LSTM layer. Applies to all models.
+    input_dims : NumPy (2D) array of integers
+        Number of (2D) features in the input.
+    output_dims : int
+        Number of outputs (1 for binary tasks).
+    tasks : list of int or str
+        List of learning tasks.
+    learning_rate : float
+        Learning rate for the model.
+
+    Returns
+    -------
+    model : TensorFlow model
+        Compiled model with the defined architecture.
+    """
+
+    tasks = [str(task) for task in tasks]
+    num_tasks = len(tasks)
+
+    # input layer
+    input_layer = Input(shape=input_dims)
+
+    # add LSTM layer to the model
+    model = LSTM(units=lstm_layer_size, activation='relu', input_shape=input_dims, name='LSTM', return_sequences=False)(input_layer)
+
+    # paper author's code ends up referring to one dense layer per task (group)
+    output_layers = []
+    for task_idx in range(num_tasks):
+        output_layers.append(Dense(output_dims, activation='sigmoid', name=tasks[task_idx])(model))
+
+    # final model building
+    model = Model(inputs=input_layer, outputs=output_layers)
+    model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=learning_rate), metrics=['accuracy'])
+
+    return model
 
 def run_mortality_prediction_task(model_type='global',
                                   cutoff_hours=24, gap_hours=12,
@@ -945,7 +1061,9 @@ def run_mortality_prediction_task(model_type='global',
         sample_weight = np.array([task_weights[cohort] for cohort in cohorts_train])
 
     model_filename = f"{save_to_folder}models/model_{cutoff_hours}+{gap_hours}_{cohort_criteria_to_select}"
-    results_filename = f'{save_to_folder}results/model_{cutoff_hours}+{gap_hours}_{cohort_criteria_to_select}.h5'
+    filename_part_bootstrap = "bootstrap-ON" if bootstrap else "bootstrap-OFF"
+    results_filename = f'{save_to_folder}results/model_{model_type}_{cutoff_hours}+{gap_hours}'
+    results_filename = results_filename + f'_{cohort_criteria_to_select}_{filename_part_bootstrap}.h5'
 
     if model_type == 'global':
         #-----------------------
@@ -975,10 +1093,10 @@ def run_mortality_prediction_task(model_type='global',
         # https://stackoverflow.com/questions/33275461/specificity-in-scikit-learn
         # PPV (Predictive Positive Value) is same as precision
         # Specificity is same as recall of the negative class... using that trick to get it in sklearn
-        
+
         if not bootstrap:
 
-            metrics_df = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']))
+            metrics_df = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']), dtype=float)
 
             for task in tasks:
                 auc = roc_auc_score(y_test[cohorts_test == task], y_scores[cohorts_test == task])
@@ -1001,21 +1119,112 @@ def run_mortality_prediction_task(model_type='global',
 
             lst_of_tasks = list(tasks)
             lst_of_tasks.append('Micro')
-            idx = pd.MultiIndex.from_product([lst_of_tasks, list(np.arange(1, 101))], names=['Cohort', 'Sample'])
-            metrics_df = pd.DataFrame(index=idx, columns=['AUC', 'PPV', 'Specificity'])
+
+            idx = pd.MultiIndex.from_product([lst_of_tasks, list(np.arange(1, 101).astype(str))], names=['Cohort', 'Sample'])
+            metrics_df = pd.DataFrame(index=idx, columns=['AUC', 'PPV', 'Specificity'], dtype=float)
 
             for task in tasks:
-                all_auc = bootstrap_predict(X_test, y_test, cohorts_test, task, model,
-                                            num_bootstrap_samples=num_bootstrapped_samples)
+                all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, task, model,
+                                                                      num_bootstrap_samples=num_bootstrapped_samples)
                 metrics_df.loc[task, 'AUC'] = all_auc
+                metrics_df.loc[task, 'PPV'] = all_ppv
+                metrics_df.loc[task, 'Specificity'] = all_specificity
 
             # calculate macro AUC
-            metrics_df.loc['Macro', :] = metrics_df.query("Cohort != 'Micro'").mean()
+            metrics_df.loc['Macro', :] = metrics_df.query("Cohort != 'Micro'").mean().values
 
             # calculate micro AUC
-            all_auc = bootstrap_predict(X_test, y_test, cohorts_test, 'all', model,
+            all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, 'all', model,
                                         num_bootstrap_samples=num_bootstrapped_samples)
             metrics_df.loc['Micro', 'AUC'] = all_auc
+            metrics_df.loc['Micro', 'PPV'] = all_ppv
+            metrics_df.loc['Micro', 'Specificity'] = all_specificity
+
+        # save results
+        metrics_df.to_hdf(results_filename, key='metrics', mode='w')
+
+    elif model_type == 'multitask':
+        #--------------------------
+        # train the multitask model
+
+        print('    ' + '~' * 76)
+        print(f"    Training '{model_type}' model...")
+
+        num_tasks = len(tasks)
+        cohort_to_index = dict(zip(tasks, range(num_tasks)))
+
+        model = create_multitask_learning_model(lstm_layer_size=lstm_layer_size, input_dims=X_train.shape[1:],
+                                                  output_dims=1, tasks=tasks, learning_rate=learning_rate)
+        print(model.summary())
+
+        early_stopping = EarlyStopping(monitor='val_loss', patience=4)
+
+        model.fit(X_train, [y_train for i in range(num_tasks)], epochs=epochs, batch_size=100,
+                sample_weight=get_mtl_sample_weights(y_train, cohorts_train, tasks, sample_weight=sample_weight),
+                callbacks=[early_stopping],
+                validation_data=(X_val, [y_val for i in range(num_tasks)]))
+        model.save(model_filename)
+
+        print('    ' + '~' * 76)
+        print(f"    Predicting using '{model_type}' model...", flush=True)
+        y_scores = np.squeeze(model.predict(X_test))
+        y_pred = (y_scores > 0.5).astype("int32")
+
+        # calculate AUC, PPV, and Specificity for every cohort
+        # https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8156826/
+        # https://stackoverflow.com/questions/56253863/precision-recall-and-confusion-matrix-problems-in-sklearn
+        # https://stackoverflow.com/questions/33275461/specificity-in-scikit-learn
+        # PPV (Predictive Positive Value) is same as precision
+        # Specificity is same as recall of the negative class... using that trick to get it in sklearn
+
+        if not bootstrap:
+
+            metrics_df = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']), dtype=float)
+
+            for task in tasks:
+                y_scores_in_cohort = y_scores[cohorts_test == task, cohort_to_index[task]]
+                y_pred_in_cohort = y_pred[cohorts_test == task, cohort_to_index[task]]
+                y_true_in_cohort = y_test[cohorts_test == task, cohort_to_index[task]]
+                auc = roc_auc_score(y_true_in_cohort, y_scores_in_cohort)
+                ppv = precision_score(y_true_in_cohort, y_pred_in_cohort)
+                specificity = recall_score(y_true_in_cohort, y_pred_in_cohort, pos_label=0)
+                metrics_df.loc[task, 'AUC'] = auc
+                metrics_df.loc[task, 'PPV'] = ppv
+                metrics_df.loc[task, 'Specificity'] = specificity
+
+            # calculate macro AUC
+            metrics_df.loc['Macro', :] = metrics_df.loc[(metrics_df.index != 'Macro') & (metrics_df.index != 'Micro')].mean()
+
+            # calculate micro AUC
+            metrics_df.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_scores[np.arange(len(y_test)), [cohort_to_index[c] for c in cohorts_test]])
+            metrics_df.loc['Micro', 'PPV'] = precision_score(y_test, y_pred[np.arange(len(y_test)), [cohort_to_index[c] for c in cohorts_test]])
+            metrics_df.loc['Micro', 'Specificity'] = recall_score(y_test, y_pred[np.arange(len(y_test)), [cohort_to_index[c] for c in cohorts_test]], pos_label=0)
+        
+        else:
+            # get `num_bootstrapped_samples` and calculate AUC, PPV, and specificity
+
+            lst_of_tasks = list(tasks)
+            lst_of_tasks.append('Micro')
+
+            idx = pd.MultiIndex.from_product([lst_of_tasks, list(np.arange(1, 101).astype(str))], names=['Cohort', 'Sample'])
+            metrics_df = pd.DataFrame(index=idx, columns=['AUC', 'PPV', 'Specificity'], dtype=float)
+
+            for task in tasks:
+                all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, task, model,
+                                                                      tasks=tasks, num_bootstrap_samples=num_bootstrapped_samples)
+                metrics_df.loc[task, 'AUC'] = all_auc
+                metrics_df.loc[task, 'PPV'] = all_ppv
+                metrics_df.loc[task, 'Specificity'] = all_specificity
+
+            # calculate macro AUC
+            metrics_df.loc['Macro', :] = metrics_df.query("Cohort != 'Micro'").mean().values
+
+            # calculate micro AUC
+            all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, 'all', model,
+                                                                  tasks=tasks, num_bootstrap_samples=num_bootstrapped_samples)
+            metrics_df.loc['Micro', 'AUC'] = all_auc
+            metrics_df.loc['Micro', 'PPV'] = all_ppv
+            metrics_df.loc['Micro', 'Specificity'] = all_specificity
 
         # save results
         metrics_df.to_hdf(results_filename, key='metrics', mode='w')
