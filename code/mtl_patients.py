@@ -10,7 +10,7 @@ from keras.optimizers import Adam
 from sklearn.metrics import roc_auc_score, precision_score, recall_score
 from sklearn.mixture import GaussianMixture
 from sklearn.model_selection import train_test_split
-from tqdm.autonotebook import tqdm
+from tqdm.notebook import tqdm_notebook
 
 def transform_into_zscores(x, mean_dict, stdev_dict):
     """ 
@@ -779,7 +779,7 @@ def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_b
     all_ppv = []
     all_specificity = []
 
-    for i in tqdm(range(num_bootstrap_samples)):
+    for i in tqdm_notebook(range(num_bootstrap_samples)):
         # build one complete set of bootstrapped samples
         pos_samples_idx = all_pos_samples_idx[i]
         neg_samples_idx = all_neg_samples_idx[i]
@@ -800,7 +800,7 @@ def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_b
             cohorts_bootstrap_sample_task = cohorts_bootstrap_sample
 
         # run prediction for the bootstrap sample
-        y_scores = model.predict(X_bootstrap_sample_task, batch_size=128, verbose=0)
+        y_scores = np.squeeze(model.predict(X_bootstrap_sample_task, batch_size=128, verbose=0))
         y_pred = (y_scores > 0.5).astype("int32")
         if len(y_scores) < len(y_bootstrap_sample_task):
             y_scores = get_correct_task_mtl_outputs(y_scores, cohorts_bootstrap_sample_task, tasks)
@@ -810,9 +810,9 @@ def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_b
         try:
             auc = roc_auc_score(y_bootstrap_sample_task, y_scores)
             all_auc.append(auc)
-            ppv = precision_score(y_bootstrap_sample_task, y_pred)
+            ppv = precision_score(y_bootstrap_sample_task, y_pred, zero_division=0)
             all_ppv.append(ppv)
-            specificity = recall_score(y_bootstrap_sample_task, y_pred, pos_label=0)
+            specificity = recall_score(y_bootstrap_sample_task, y_pred, zero_division=0, pos_label=0)
             all_specificity.append(specificity)
         except Exception as e:
             print(f'        Skipped this sample: {e}.')
@@ -841,19 +841,19 @@ def create_single_task_learning_model(lstm_layer_size, input_dims, output_dims, 
         Compiled model with the defined architecture.
     """
 
-    model = Sequential()
+    model = Sequential(name='single_task_learning_model')
 
     # add LSTM layer to the model
-    model.add(LSTM(units=lstm_layer_size, activation='relu', input_shape=input_dims, return_sequences=False))
+    model.add(LSTM(units=lstm_layer_size, activation='relu', input_shape=input_dims, return_sequences=False, name='lstm'))
 
     # add output (dense) layer to the  model
-    model.add(Dense(units=output_dims, activation='sigmoid'))
+    model.add(Dense(units=output_dims, activation='sigmoid', name='dense'))
 
     model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=learning_rate), metrics=['accuracy'])
 
     return model
 
-def get_mtl_sample_weights(y, cohorts, all_tasks, sample_weights=None):
+def get_mtl_sample_weights(y, cohorts, all_tasks, sample_weight=None):
     """ 
     Generates a dictionary of sample weights for the multitask model that masks out 
     (and prevents training on) outputs corresponding to cohorts to which a given sample doesn't belong. 
@@ -881,8 +881,8 @@ def get_mtl_sample_weights(y, cohorts, all_tasks, sample_weights=None):
     sample_weight_dict = {}
     for task in all_tasks:
         task_indicator_col = (cohorts == task).astype(int)
-        if sample_weights:
-            task_indicator_col = np.array(task_indicator_col) * np.array(sample_weights)
+        if sample_weight:
+            task_indicator_col = np.array(task_indicator_col) * np.array(sample_weight)
         sample_weight_dict[task] = task_indicator_col
 
     return sample_weight_dict
@@ -943,10 +943,10 @@ def create_multitask_learning_model(lstm_layer_size, input_dims, output_dims, ta
     num_tasks = len(tasks)
 
     # input layer
-    input_layer = Input(shape=input_dims)
+    input_layer = Input(shape=input_dims, name='input')
 
     # add LSTM layer to the model
-    model = LSTM(units=lstm_layer_size, activation='relu', input_shape=input_dims, name='LSTM', return_sequences=False)(input_layer)
+    model = LSTM(units=lstm_layer_size, activation='relu', input_shape=input_dims, name='lstm', return_sequences=False)(input_layer)
 
     # paper author's code ends up referring to one dense layer per task (group)
     output_layers = []
@@ -954,7 +954,7 @@ def create_multitask_learning_model(lstm_layer_size, input_dims, output_dims, ta
         output_layers.append(Dense(output_dims, activation='sigmoid', name=tasks[task_idx])(model))
 
     # final model building
-    model = Model(inputs=input_layer, outputs=output_layers)
+    model = Model(inputs=input_layer, outputs=output_layers, name='multitask_learning_model')
     model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=learning_rate), metrics=['accuracy'])
 
     return model
@@ -1060,7 +1060,7 @@ def run_mortality_prediction_task(model_type='global',
         # calculate sample weight as the cohort's inverse frequency corresponding to each sample
         sample_weight = np.array([task_weights[cohort] for cohort in cohorts_train])
 
-    model_filename = f"{save_to_folder}models/model_{cutoff_hours}+{gap_hours}_{cohort_criteria_to_select}"
+    model_filename = f"{save_to_folder}models/model_{model_type}_{cutoff_hours}+{gap_hours}_{cohort_criteria_to_select}"
     filename_part_bootstrap = "bootstrap-ON" if bootstrap else "bootstrap-OFF"
     results_filename = f'{save_to_folder}results/model_{model_type}_{cutoff_hours}+{gap_hours}'
     results_filename = results_filename + f'_{cohort_criteria_to_select}_{filename_part_bootstrap}.h5'
@@ -1154,11 +1154,12 @@ def run_mortality_prediction_task(model_type='global',
         cohort_to_index = dict(zip(tasks, range(num_tasks)))
 
         model = create_multitask_learning_model(lstm_layer_size=lstm_layer_size, input_dims=X_train.shape[1:],
-                                                  output_dims=1, tasks=tasks, learning_rate=learning_rate)
+                                                output_dims=1, tasks=tasks, learning_rate=learning_rate)
         print(model.summary())
 
         early_stopping = EarlyStopping(monitor='val_loss', patience=4)
 
+        # when fitting the model we repeat y (label) number of tasks times
         model.fit(X_train, [y_train for i in range(num_tasks)], epochs=epochs, batch_size=100,
                 sample_weight=get_mtl_sample_weights(y_train, cohorts_train, tasks, sample_weight=sample_weight),
                 callbacks=[early_stopping],
@@ -1167,6 +1168,7 @@ def run_mortality_prediction_task(model_type='global',
 
         print('    ' + '~' * 76)
         print(f"    Predicting using '{model_type}' model...", flush=True)
+        # calculated scores will be an array of `num_tasks` predictions
         y_scores = np.squeeze(model.predict(X_test))
         y_pred = (y_scores > 0.5).astype("int32")
 
@@ -1182,11 +1184,12 @@ def run_mortality_prediction_task(model_type='global',
             metrics_df = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']), dtype=float)
 
             for task in tasks:
-                y_scores_in_cohort = y_scores[cohorts_test == task, cohort_to_index[task]]
-                y_pred_in_cohort = y_pred[cohorts_test == task, cohort_to_index[task]]
-                y_true_in_cohort = y_test[cohorts_test == task, cohort_to_index[task]]
+                #y_scores_in_cohort = y_scores[cohorts_test == task, cohort_to_index[task]]
+                y_scores_in_cohort = y_scores[cohort_to_index[task], cohorts_test == task]
+                y_pred_in_cohort = y_pred[cohort_to_index[task], cohorts_test == task]
+                y_true_in_cohort = y_test[cohorts_test == task]
                 auc = roc_auc_score(y_true_in_cohort, y_scores_in_cohort)
-                ppv = precision_score(y_true_in_cohort, y_pred_in_cohort)
+                ppv = precision_score(y_true_in_cohort, y_pred_in_cohort, zero_division=0)
                 specificity = recall_score(y_true_in_cohort, y_pred_in_cohort, pos_label=0)
                 metrics_df.loc[task, 'AUC'] = auc
                 metrics_df.loc[task, 'PPV'] = ppv
@@ -1196,9 +1199,9 @@ def run_mortality_prediction_task(model_type='global',
             metrics_df.loc['Macro', :] = metrics_df.loc[(metrics_df.index != 'Macro') & (metrics_df.index != 'Micro')].mean()
 
             # calculate micro AUC
-            metrics_df.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_scores[np.arange(len(y_test)), [cohort_to_index[c] for c in cohorts_test]])
-            metrics_df.loc['Micro', 'PPV'] = precision_score(y_test, y_pred[np.arange(len(y_test)), [cohort_to_index[c] for c in cohorts_test]])
-            metrics_df.loc['Micro', 'Specificity'] = recall_score(y_test, y_pred[np.arange(len(y_test)), [cohort_to_index[c] for c in cohorts_test]], pos_label=0)
+            metrics_df.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_scores[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))])
+            metrics_df.loc['Micro', 'PPV'] = precision_score(y_test, y_pred[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))])
+            metrics_df.loc['Micro', 'Specificity'] = recall_score(y_test, y_pred[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))], pos_label=0)
         
         else:
             # get `num_bootstrapped_samples` and calculate AUC, PPV, and specificity
