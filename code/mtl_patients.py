@@ -3,11 +3,12 @@ import tensorflow as tf
 import numpy as np
 import pandas as pd
 import random
+from datetime import datetime
 from keras.callbacks import EarlyStopping
 from keras.layers import Input, Dense, LSTM, RepeatVector
 from keras.models import Model, Sequential
 from keras.optimizers import Adam
-from sklearn.metrics import roc_auc_score, precision_score, recall_score
+from sklearn.metrics import roc_auc_score, roc_curve, precision_score, recall_score
 from sklearn.mixture import GaussianMixture
 from sklearn.model_selection import train_test_split
 from tqdm.notebook import tqdm_notebook
@@ -109,7 +110,6 @@ def categorize_ethnicity(ethnicity):
 def get_summaries(cutoff_hours=24,
                   gap_hours=12,
                   mimic_extract_filename='../data/all_hourly_data.h5',
-                  mimic_sqlalchemy_db_uri='',
                   mimic_data_folder = '../data/'):
     """ 
     Returns summaries of data coming from publicly available sources (MIMIC-III database).
@@ -125,10 +125,6 @@ def get_summaries(cutoff_hours=24,
     mimic_extract_filename : str, default '../data/all_hourly_data.h5'
         String containing the full pathname of the file resulting from running the
         MIMIC-Extract (Wang et al., 2020) pipeline.
-    mimic_sqlalchemy_db_uri : str, default ''
-        String containing the database URI used by SQLAlchemy to access the PostgreSQL
-        MIMIC database. A typical value could be 'postgresql:///mimic'. If blank, the
-        'mimic_data_folder' parameter is used instead.
     mimic_data_folder : str, default '../data/'
         String containing the folder name (including the trailing slash) where the
         additional MIMIC concept tables saved as the CSV files, `code_status.csv` and
@@ -342,6 +338,136 @@ def get_summaries(cutoff_hours=24,
     print('    Done!', flush=True)
 
     return pat_summ_by_cu_df, pat_summ_by_sapsiiq_df, vitals_labs_summ_df
+
+def get_heatmap_data(cutoff_hours=24,
+                     gap_hours=12,
+                     mimic_extract_filename='../data/all_hourly_data.h5',
+                     mimic_data_folder = '../data/',
+                     cohort_unsupervised_filename='../data/unsupervised_clusters.npy'):
+    from mtl_patients import transform_into_zscores
+    """ 
+    Returns summaries of selected vitals and labs for patients by cohort that can be used
+    to represent them in heatmaps like those shown in Figure 4 of the paper. These heatmaps
+    plot z-score values (color hue) for 2D arrays of selected vital/lab versus hours the
+    patient has spent in the ICU.
+
+    Parameters
+    ----------
+    cutoff_hours : int, default 24
+        Number of hours of data immediately after a patient goes into the ICU that the
+        models will be used during the training stage to predict mortality of the patient.
+    gap_hours : int, default 12
+        Number of hours after the `cutoff_hours` period end before performing a mortality
+        prediction. This gap is maintained to avoid label leakage.
+    mimic_extract_filename : str, default '../data/all_hourly_data.h5'
+        String containing the full pathname of the file resulting from running the
+        MIMIC-Extract (Wang et al., 2020) pipeline.
+    mimic_data_folder : str, default '../data/'
+        String containing the folder name (including the trailing slash) where the
+        additional MIMIC concept tables saved as the CSV files, `code_status.csv` and
+        `sapsii.csv` are stored.
+    cohort_unsupervised_filename : str, default '../data/unsupervised_clusters.npy'
+        Filename where array of cluster memberships will be saved to using NumPy format.
+
+    -------
+    labs_df : Pandas DataFrame
+        A dataframe providing mean of z-scores of selected labs per hour in the ICU.
+    vitals_df : Pandas DataFrame
+        A dataframe providing mean of z-scores of selected vitals per hour in the ICU.
+    """
+
+    cohort_unsupervised = np.load(cohort_unsupervised_filename)
+
+    # the next two MIMIC-Extract pipeline dataframes are needed to reproduce the paper
+    patients_df = pd.read_hdf(mimic_extract_filename, 'patients')
+    vitals_labs_mean_df = pd.read_hdf(mimic_extract_filename, 'vitals_labs_mean')
+
+    # paper Figure 4 considers 10 labs and 6 vitals (time-varying series)
+    labs_to_keep_list = [
+        'glucose',
+        'magnesium',
+        'phosphate',
+        'lactate',
+        'anion gap',
+        'sodium',
+        'potassium',
+        'chloride',
+        'blood urea nitrogen',
+        'creatinine'
+    ]
+    vitals_to_keep_list = [
+        'mean blood pressure',
+        'systolic blood pressure',
+        'diastolic blood pressure',
+        'heart rate',
+        'respiratory rate',
+        'oxygen saturation'
+    ]
+
+    # paper considers the following static variables (per patient)
+    static_df = patients_df[['first_careunit', 'intime', 'deathtime', 'dischtime', 'gender', 'age', 'ethnicity']]
+
+    X = vitals_labs_mean_df[labs_to_keep_list + vitals_to_keep_list]
+    X = X.droplevel(1, axis=1).reset_index()
+    # Note: X at this point in time contains only the physiological data (no static data)
+
+    # add mortality outcome which in this paper is not just death, but CMO (Comfort Measures Only) too:
+    #  - `mort_hosp_valid` which is a flag (True: patient died, False: patient alive)
+    #  - `min_mort_time` which is the minimum timestamp of deathtime, the CMO note, or the DNR (Do Not Resuscitate) note.
+    deathtimes_df = static_df[['deathtime', 'dischtime']].dropna()
+    deathtimes_valid_df = deathtimes_df[deathtimes_df.dischtime >= deathtimes_df.deathtime].copy()
+    deathtimes_valid_df.loc[:, 'mort_hosp_valid'] = True
+    cmo_df = pd.read_csv(f'{mimic_data_folder}code_status.csv')
+    cmo_df = cmo_df[cmo_df.cmo > 0]  # only keep those patients with a CMO note
+    cmo_df['dnr_first_charttime'] = pd.to_datetime(cmo_df.dnr_first_charttime)
+    cmo_df['timecmo_chart'] = pd.to_datetime(cmo_df.timecmo_chart)
+    cmo_df['cmo_df_min_time'] = cmo_df.loc[:, ['dnr_first_charttime', 'timecmo_chart']].min(axis=1)
+    all_mort_times_df = pd.merge(deathtimes_valid_df, cmo_df, on=['subject_id', 'hadm_id', 'icustay_id'], how='outer') \
+        [['subject_id', 'hadm_id', 'icustay_id', 'deathtime', 'dischtime', 'cmo_df_min_time']]
+    all_mort_times_df['deathtime'] = pd.to_datetime(all_mort_times_df.deathtime)
+    all_mort_times_df['cmo_df_min_time'] = pd.to_datetime(all_mort_times_df.cmo_df_min_time)
+    all_mort_times_df['min_mort_time'] = all_mort_times_df.loc[:, ['deathtime', 'cmo_df_min_time']].min(axis=1)
+    min_mort_time_df = all_mort_times_df[['subject_id', 'hadm_id', 'icustay_id', 'min_mort_time']]
+    static_df = pd.merge(static_df, min_mort_time_df, on=['subject_id', 'hadm_id', 'icustay_id'], how='left')
+    static_df['mort_hosp_valid'] = np.invert(np.isnat(static_df.min_mort_time))
+
+    # only keep patients that stayed alive after at least `cutoff_hours` hours in the ICU
+    # or died after `cutoff hours` + `gap hours` hours, e.g., 36 hours
+    static_df['time_til_mort'] = pd.to_datetime(static_df.min_mort_time) - pd.to_datetime(static_df.intime)
+    static_df['time_til_mort'] = static_df.time_til_mort.apply(lambda x: x.total_seconds() / 3600)
+    static_df['time_in_icu'] = pd.to_datetime(static_df.dischtime) - pd.to_datetime(static_df.intime)
+    static_df['time_in_icu'] = static_df.time_in_icu.apply(lambda x: x.total_seconds() / 3600)
+    static_df = static_df[((static_df.time_in_icu >= cutoff_hours) & (static_df.mort_hosp_valid == False)) 
+                        | (static_df.time_til_mort >= cutoff_hours + gap_hours)]
+
+    # make z-scores and keep only `cutoff_hours` hours of records
+    INDEX_COLS = ['subject_id', 'icustay_id', 'hours_in', 'hadm_id']
+    normal_dict = X.groupby(['subject_id']).mean().mean().to_dict()
+    std_dict = X.std().to_dict()
+    feature_cols = X.columns[len(INDEX_COLS):]
+    X_words = X.loc[:, feature_cols].apply(lambda x: transform_into_zscores(x, normal_dict, std_dict), axis=0)
+    X[feature_cols] = X_words
+    X = X[X.hours_in < cutoff_hours]
+
+    # create dataframe with a map from subject_id to cohort
+    subject_ids = np.unique(static_df.reset_index().subject_id)
+    patient_to_cohort_df = pd.DataFrame({'subject_id': subject_ids, 'cohort': cohort_unsupervised}, dtype=int)
+
+    # use map to add cohort to X matrix
+    X = pd.merge(X, patient_to_cohort_df, left_on='subject_id', right_on='subject_id')
+
+    # change back 9 to np.NaN
+    X[labs_to_keep_list + vitals_to_keep_list] = X[labs_to_keep_list + vitals_to_keep_list].replace({9: np.NaN})
+
+    labs_df = X[['cohort', 'hours_in'] + labs_to_keep_list]
+    labs_df = labs_df.groupby(['cohort', 'hours_in']).mean()  # excludes missing values
+    labs_df = labs_df.stack().unstack(level=1)
+
+    vitals_df = X[['cohort', 'hours_in'] + vitals_to_keep_list]
+    vitals_df = vitals_df.groupby(['cohort', 'hours_in']).mean()  # excludes missing values
+    vitals_df = vitals_df.stack().unstack(level=1)
+
+    return labs_df, vitals_df
 
 def prepare_data(cutoff_hours=24,
                  gap_hours=12,
@@ -646,7 +772,12 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
 
     X, Y, careunits, sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
 
+    print('+' * 80, flush=True)
+    print('Discovering cohorts in an unsupervised way', flush=True)
+    print('-' * 80, flush=True)
+
     # Do train/validation/test split using careunits as the cohort classifier
+    print('    Splitting data into train/validation/test sets...', flush=True)
     X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test = \
         stratified_split(X, Y, careunits, train_val_random_seed=train_val_random_seed)
 
@@ -677,14 +808,17 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
     early_stopping = EarlyStopping(monitor='val_loss', patience=3)
 
     # fit (train) the LSTM autoencoder model
-    print('Training LSTM autoencoder started...')
+    msg = f'    Training LSTM autoencoder started at {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}. '
+    msg = msg + 'This will take several minutes (5 to 25). Please be patient...'
+    print(msg, flush=True)
     lstm_autoencoder.fit(X_train, X_train,
         epochs=epochs,
         batch_size=128,
         shuffle=True,
         callbacks=[early_stopping],
-        validation_data=(X_val, X_val))
-    print('LSTM autoencoder trained!')
+        validation_data=(X_val, X_val),
+        verbose = 1)
+    print('    LSTM autoencoder trained!', flush=True)
 
     # now that the LSTM autoencoder model is trained
     # the corresponding encoder is trained as well
@@ -694,17 +828,19 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
     print(f'Patient embeddings created! Shape: {embeddings_X.shape}')
 
     # With the embeddings now we can fit a Gaussian Mixture Model
-    print('Training Gaussian Mixture Model...')
-    gmm = GaussianMixture(n_components=num_clusters, tol=gmm_tol, verbose=True)
+    print('    Training Gaussian Mixture Model...', flush=True)
+    gmm = GaussianMixture(n_components=num_clusters, tol=gmm_tol, verbose=False)
     gmm.fit(embeddings_X_train)
 
     # Finally, we can calculate the cluster membership
     cohort_unsupervised = gmm.predict(embeddings_X)
-    print(f'Gaussian Mixture Model applied to embeddings! Results shape: {cohort_unsupervised.shape}')
+    print(f'    Gaussian Mixture Model applied to embeddings! Results shape: {cohort_unsupervised.shape}', flush=True)
 
     # Let's save the cluster results
     np.save(cohort_unsupervised_filename, cohort_unsupervised)
-    print(f"Cluster results saved to '{cohort_unsupervised_filename}'")
+    print(f"    Cluster results saved to '{cohort_unsupervised_filename}'", flush=True)
+
+    print(f"    Done!", flush=True)
 
     return cohort_unsupervised
 
@@ -801,7 +937,10 @@ def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_b
 
         # run prediction for the bootstrap sample
         y_scores = np.squeeze(model.predict(X_bootstrap_sample_task, batch_size=128, verbose=0))
-        y_pred = (y_scores > 0.5).astype("int32")
+        _, tpr, thresholds = roc_curve(y_bootstrap_sample_task, y_scores) # get TPR, aka sensitivity, and thresholds
+        threshold_80pct = thresholds[np.argmin(np.abs(tpr - 0.8))] # threshold closes to give an 80% TPR
+        # Why 80% threshold? That is what the paper selected to display the results 
+        y_pred = (y_scores > threshold_80pct).astype("int32") # use calculated threshold to do predictions
         if len(y_scores) < len(y_bootstrap_sample_task):
             y_scores = get_correct_task_mtl_outputs(y_scores, cohorts_bootstrap_sample_task, tasks)
             y_pred = get_correct_task_mtl_outputs(y_pred, cohorts_bootstrap_sample_task, tasks)
@@ -1012,6 +1151,11 @@ def run_mortality_prediction_task(model_type='global',
 
     Returns
     -------
+    metrics_df : Pandas Dataframe
+        Dataframe containing the metrics resulting from running the mortality prediction task.
+        Results will be similar to table 4 of the paper (for the given cohorts and selected model)
+        or will be a dataframe with `num_bootstrapped_samples` per cohort for the model selected
+        so additional post-processing (like Wilcoxon signed-rank test) can be applied.
     """
 
     # setting the seeds to get reproducible results
@@ -1085,7 +1229,10 @@ def run_mortality_prediction_task(model_type='global',
         print('    ' + '~' * 76)
         print(f"    Predicting using '{model_type}' model...", flush=True)
         y_scores = np.squeeze(model.predict(X_test))
-        y_pred = (y_scores > 0.5).astype("int32")
+        _, tpr, thresholds = roc_curve(y_test, y_scores) # get TPR, aka sensitivity, and thresholds
+        threshold_80pct = thresholds[np.argmin(np.abs(tpr - 0.8))] # threshold closes to give an 80% TPR
+        # Why 80% threshold? That is what the paper selected to display the results 
+        y_pred = (y_scores > threshold_80pct).astype("int32") # use calculated threshold to do predictions
 
         # calculate AUC, PPV, and Specificity for every cohort
         # https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8156826/
@@ -1170,7 +1317,10 @@ def run_mortality_prediction_task(model_type='global',
         print(f"    Predicting using '{model_type}' model...", flush=True)
         # calculated scores will be an array of `num_tasks` predictions
         y_scores = np.squeeze(model.predict(X_test))
-        y_pred = (y_scores > 0.5).astype("int32")
+        _, tpr, thresholds = roc_curve(y_test, y_scores) # get TPR, aka sensitivity, and thresholds
+        threshold_80pct = thresholds[np.argmin(np.abs(tpr - 0.8))] # threshold closes to give an 80% TPR
+        # Why 80% threshold? That is what the paper selected to display the results 
+        y_pred = (y_scores > threshold_80pct).astype("int32") # use calculated threshold to do predictions
 
         # calculate AUC, PPV, and Specificity for every cohort
         # https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8156826/
@@ -1235,4 +1385,3 @@ def run_mortality_prediction_task(model_type='global',
     print(f"    Done!", flush=True)
 
     return metrics_df
-

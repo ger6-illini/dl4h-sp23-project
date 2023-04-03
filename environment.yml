@@ -1,5 +1,6 @@
 name: mimic_data_extraction
 channels:
+  - conda-forge
   - defaults
 dependencies:
   - _tflow_select=2.2.0=eigen
@@ -16,6 +17,7 @@ dependencies:
   - astunparse=1.6.3=py_0
   - async-timeout=4.0.2=py310hecd8cb5_0
   - attrs=22.1.0=py310hecd8cb5_0
+  - babel=2.12.1=pyhd8ed1ab_1
   - backcall=0.2.0=pyhd3eb1b0_0
   - beautifulsoup4=4.11.1=py310hecd8cb5_0
   - blas=1.0=mkl
@@ -61,19 +63,25 @@ dependencies:
   - hdf5=1.10.6=h10fe05b_1
   - icu=58.2=h0a44026_3
   - idna=3.4=py310hecd8cb5_0
+  - importlib-metadata=6.1.0=pyha770c72_0
   - intel-openmp=2021.4.0=hecd8cb5_3538
   - ipykernel=6.19.2=py310h20db666_0
   - ipython=8.10.0=py310hecd8cb5_0
   - ipython_genutils=0.2.0=pyhd3eb1b0_1
+  - ipywidgets=8.0.6=pyhd8ed1ab_0
   - jedi=0.18.1=py310hecd8cb5_1
   - jinja2=3.1.2=py310hecd8cb5_0
   - joblib=1.1.1=py310hecd8cb5_0
   - jpeg=9e=h6c40b1e_1
+  - json5=0.9.5=pyh9f0ad1d_0
   - jsonschema=4.17.3=py310hecd8cb5_0
   - jupyter_client=7.4.9=py310hecd8cb5_0
   - jupyter_core=5.2.0=py310hecd8cb5_0
   - jupyter_server=1.23.4=py310hecd8cb5_0
+  - jupyterlab=3.5.0=pyhd8ed1ab_0
   - jupyterlab_pygments=0.1.2=py_0
+  - jupyterlab_server=2.22.0=pyhd8ed1ab_0
+  - jupyterlab_widgets=3.0.7=pyhd8ed1ab_0
   - keras=2.10.0=py310hecd8cb5_0
   - keras-preprocessing=1.1.2=pyhd3eb1b0_0
   - kiwisolver=1.4.4=py310hcec6c5f_0
@@ -180,6 +188,7 @@ dependencies:
   - rsa=4.7.2=pyhd3eb1b0_1
   - scikit-learn=1.2.1=py310hcec6c5f_0
   - scipy=1.10.0=py310h64422d5_1
+  - seaborn=0.12.2=py310hecd8cb5_0
   - send2trash=1.8.0=pyhd3eb1b0_1
   - setuptools=65.6.3=py310hecd8cb5_0
   - six=1.16.0=pyhd3eb1b0_1
@@ -200,7 +209,9 @@ dependencies:
   - threadpoolctl=2.2.0=pyh0d69192_0
   - tinycss2=1.2.1=py310hecd8cb5_0
   - tk=8.6.12=h5d9f67b_0
+  - tomli=2.0.1=pyhd8ed1ab_0
   - tornado=6.2=py310hca72f7f_0
+  - tqdm=4.65.0=py310h20db666_0
   - traitlets=5.7.1=py310hecd8cb5_0
   - typing-extensions=4.4.0=py310hecd8cb5_0
   - typing_extensions=4.4.0=py310hecd8cb5_0
@@ -211,16 +222,18 @@ dependencies:
   - websocket-client=0.58.0=py310hecd8cb5_4
   - werkzeug=2.2.2=py310hecd8cb5_0
   - wheel=0.35.1=pyhd3eb1b0_0
+  - widgetsnbextension=4.0.7=pyhd8ed1ab_0
   - wrapt=1.14.1=py310hca72f7f_0
   - xz=5.2.10=h6c40b1e_1
   - yaml=0.2.5=haf1e3a3_0
   - yarl=1.8.1=py310hca72f7f_0
   - zeromq=4.3.4=h23ab428_0
+  - zipp=3.15.0=pyhd8ed1ab_0
   - zlib=1.2.13=h4dc903c_0
   - zstd=1.5.2=hcb37349_0
   - pip:
-      - patsy==0.5.3
-      - statsmodels==0.13.5
-      - tableone==0.7.12
-      - tabulate==0.9.0
-prefix: /Users/family/opt/anaconda3/envs/mimic_data_extraction
+    - patsy==0.5.3
+    - statsmodels==0.13.5
+    - tableone==0.7.12
+    - tabulate==0.9.0
+prefix: /Users/geramire/opt/anaconda3/envs/mimic_data_extraction
