@@ -860,7 +860,7 @@ def set_global_determinism(seed):
     tf.config.threading.set_inter_op_parallelism_threads(1)
     tf.config.threading.set_intra_op_parallelism_threads(1)
 
-def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_bootstrap_samples=100):
+def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_bootstrap_samples=100, sensitivity=0.8):
     """ 
     Evaluates model on each of the `num_bootstrap_samples` sets. 
 
@@ -880,6 +880,8 @@ def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_b
         List of the tasks (used for evaluating multitask model).
     num_bootstrapped_samples : int, default 100
         Number of bootstrapped samples.
+    sensitivity : float, default 0.8
+        Percentage of sensitivity used to calculate PPV (Positive Predictive Value) and specificity.
 
     Returns
     -------
@@ -938,9 +940,9 @@ def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_b
         # run prediction for the bootstrap sample
         y_scores = np.squeeze(model.predict(X_bootstrap_sample_task, batch_size=128, verbose=0))
         _, tpr, thresholds = roc_curve(y_bootstrap_sample_task, y_scores) # get TPR, aka sensitivity, and thresholds
-        threshold_80pct = thresholds[np.argmin(np.abs(tpr - 0.8))] # threshold closes to give an 80% TPR
+        threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
         # Why 80% threshold? That is what the paper selected to display the results 
-        y_pred = (y_scores > threshold_80pct).astype("int32") # use calculated threshold to do predictions
+        y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
         if len(y_scores) < len(y_bootstrap_sample_task):
             y_scores = get_correct_task_mtl_outputs(y_scores, cohorts_bootstrap_sample_task, tasks)
             y_pred = get_correct_task_mtl_outputs(y_pred, cohorts_bootstrap_sample_task, tasks)
@@ -1022,7 +1024,7 @@ def get_mtl_sample_weights(y, cohorts, all_tasks, sample_weight=None):
         task_indicator_col = (cohorts == task).astype(int)
         if sample_weight:
             task_indicator_col = np.array(task_indicator_col) * np.array(sample_weight)
-        sample_weight_dict[task] = task_indicator_col
+        sample_weight_dict[str(task)] = task_indicator_col
 
     return sample_weight_dict
 
@@ -1108,7 +1110,8 @@ def run_mortality_prediction_task(model_type='global',
                                   epochs=30, learning_rate=0.0001,
                                   use_cohort_inv_freq_weights=False,
                                   bootstrap=False,
-                                  num_bootstrapped_samples=100):
+                                  num_bootstrapped_samples=100,
+                                  sensitivity=0.8):
     """
     Runs the in-hospital mortality prediction task using one of the three models specified in the
     original paper: global (single task), multitask, and separate (single task).
@@ -1148,6 +1151,8 @@ def run_mortality_prediction_task(model_type='global',
         Indicates if bootstrapped samples will be used.
     num_bootstrapped_samples : int, default 100
         Number of bootstrapped samples.
+    sensitivity : float, default 0.8
+        Percentage of sensitivity used to calculate PPV (Positive Predictive Value) and specificity.
 
     Returns
     -------
@@ -1230,9 +1235,9 @@ def run_mortality_prediction_task(model_type='global',
         print(f"    Predicting using '{model_type}' model...", flush=True)
         y_scores = np.squeeze(model.predict(X_test))
         _, tpr, thresholds = roc_curve(y_test, y_scores) # get TPR, aka sensitivity, and thresholds
-        threshold_80pct = thresholds[np.argmin(np.abs(tpr - 0.8))] # threshold closes to give an 80% TPR
+        threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
         # Why 80% threshold? That is what the paper selected to display the results 
-        y_pred = (y_scores > threshold_80pct).astype("int32") # use calculated threshold to do predictions
+        y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
 
         # calculate AUC, PPV, and Specificity for every cohort
         # https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8156826/
@@ -1243,15 +1248,16 @@ def run_mortality_prediction_task(model_type='global',
 
         if not bootstrap:
 
-            metrics_df = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']), dtype=float)
+            tasks_str = [str(task) for task in tasks]
+            metrics_df = pd.DataFrame(index=np.append(tasks_str, ['Macro', 'Micro']), dtype=float)
 
             for task in tasks:
                 auc = roc_auc_score(y_test[cohorts_test == task], y_scores[cohorts_test == task])
                 ppv = precision_score(y_test[cohorts_test == task], y_pred[cohorts_test == task])
                 specificity = recall_score(y_test[cohorts_test == task], y_pred[cohorts_test == task], pos_label=0)
-                metrics_df.loc[task, 'AUC'] = auc
-                metrics_df.loc[task, 'PPV'] = ppv
-                metrics_df.loc[task, 'Specificity'] = specificity
+                metrics_df.loc[str(task), 'AUC'] = auc
+                metrics_df.loc[str(task), 'PPV'] = ppv
+                metrics_df.loc[str(task), 'Specificity'] = specificity
 
             # calculate macro AUC
             metrics_df.loc['Macro', :] = metrics_df.loc[(metrics_df.index != 'Macro') & (metrics_df.index != 'Micro')].mean()
@@ -1264,7 +1270,8 @@ def run_mortality_prediction_task(model_type='global',
         else:
             # get `num_bootstrapped_samples` and calculate AUC, PPV, and specificity
 
-            lst_of_tasks = list(tasks)
+            tasks_str = [str(task) for task in tasks]
+            lst_of_tasks = list(tasks_str)
             lst_of_tasks.append('Micro')
 
             idx = pd.MultiIndex.from_product([lst_of_tasks, list(np.arange(1, 101).astype(str))], names=['Cohort', 'Sample'])
@@ -1273,9 +1280,9 @@ def run_mortality_prediction_task(model_type='global',
             for task in tasks:
                 all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, task, model,
                                                                       num_bootstrap_samples=num_bootstrapped_samples)
-                metrics_df.loc[task, 'AUC'] = all_auc
-                metrics_df.loc[task, 'PPV'] = all_ppv
-                metrics_df.loc[task, 'Specificity'] = all_specificity
+                metrics_df.loc[str(task), 'AUC'] = all_auc
+                metrics_df.loc[str(task), 'PPV'] = all_ppv
+                metrics_df.loc[str(task), 'Specificity'] = all_specificity
 
             # calculate macro AUC
             metrics_df.loc['Macro', :] = metrics_df.query("Cohort != 'Micro'").mean().values
@@ -1317,10 +1324,11 @@ def run_mortality_prediction_task(model_type='global',
         print(f"    Predicting using '{model_type}' model...", flush=True)
         # calculated scores will be an array of `num_tasks` predictions
         y_scores = np.squeeze(model.predict(X_test))
-        _, tpr, thresholds = roc_curve(y_test, y_scores) # get TPR, aka sensitivity, and thresholds
-        threshold_80pct = thresholds[np.argmin(np.abs(tpr - 0.8))] # threshold closes to give an 80% TPR
+        # get TPR, aka sensitivity, and thresholds (using micro metric)
+        _, tpr, thresholds = roc_curve(y_test, y_scores[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))])
+        threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
         # Why 80% threshold? That is what the paper selected to display the results 
-        y_pred = (y_scores > threshold_80pct).astype("int32") # use calculated threshold to do predictions
+        y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
 
         # calculate AUC, PPV, and Specificity for every cohort
         # https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8156826/
@@ -1331,19 +1339,19 @@ def run_mortality_prediction_task(model_type='global',
 
         if not bootstrap:
 
-            metrics_df = pd.DataFrame(index=np.append(tasks, ['Macro', 'Micro']), dtype=float)
+            tasks_str = [str(task) for task in tasks]
+            metrics_df = pd.DataFrame(index=np.append(tasks_str, ['Macro', 'Micro']), dtype=float)
 
             for task in tasks:
-                #y_scores_in_cohort = y_scores[cohorts_test == task, cohort_to_index[task]]
                 y_scores_in_cohort = y_scores[cohort_to_index[task], cohorts_test == task]
                 y_pred_in_cohort = y_pred[cohort_to_index[task], cohorts_test == task]
                 y_true_in_cohort = y_test[cohorts_test == task]
                 auc = roc_auc_score(y_true_in_cohort, y_scores_in_cohort)
                 ppv = precision_score(y_true_in_cohort, y_pred_in_cohort, zero_division=0)
                 specificity = recall_score(y_true_in_cohort, y_pred_in_cohort, pos_label=0)
-                metrics_df.loc[task, 'AUC'] = auc
-                metrics_df.loc[task, 'PPV'] = ppv
-                metrics_df.loc[task, 'Specificity'] = specificity
+                metrics_df.loc[str(task), 'AUC'] = auc
+                metrics_df.loc[str(task), 'PPV'] = ppv
+                metrics_df.loc[str(task), 'Specificity'] = specificity
 
             # calculate macro AUC
             metrics_df.loc['Macro', :] = metrics_df.loc[(metrics_df.index != 'Macro') & (metrics_df.index != 'Micro')].mean()
@@ -1356,7 +1364,8 @@ def run_mortality_prediction_task(model_type='global',
         else:
             # get `num_bootstrapped_samples` and calculate AUC, PPV, and specificity
 
-            lst_of_tasks = list(tasks)
+            tasks_str = [str(task) for task in tasks]
+            lst_of_tasks = list(tasks_str)
             lst_of_tasks.append('Micro')
 
             idx = pd.MultiIndex.from_product([lst_of_tasks, list(np.arange(1, 101).astype(str))], names=['Cohort', 'Sample'])
@@ -1365,9 +1374,9 @@ def run_mortality_prediction_task(model_type='global',
             for task in tasks:
                 all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, task, model,
                                                                       tasks=tasks, num_bootstrap_samples=num_bootstrapped_samples)
-                metrics_df.loc[task, 'AUC'] = all_auc
-                metrics_df.loc[task, 'PPV'] = all_ppv
-                metrics_df.loc[task, 'Specificity'] = all_specificity
+                metrics_df.loc[str(task), 'AUC'] = all_auc
+                metrics_df.loc[str(task), 'PPV'] = all_ppv
+                metrics_df.loc[str(task), 'Specificity'] = all_specificity
 
             # calculate macro AUC
             metrics_df.loc['Macro', :] = metrics_df.query("Cohort != 'Micro'").mean().values
