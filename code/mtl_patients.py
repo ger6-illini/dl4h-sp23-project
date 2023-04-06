@@ -733,7 +733,7 @@ def stratified_split(X, Y, cohorts, train_val_random_seed=0):
     return X_train, X_val, X_test, y_train, y_val, y_test, cohorts_train, cohorts_val, cohorts_test
 
 def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, embedding_dim=50,
-                     epochs=100, learning_rate=0.0001, num_clusters=3, gmm_tol=0.0001,
+                     epochs=100, learning_rate=0.0001, num_clusters=3, gmm_tol=0.0001, seed=0,
                      cohort_unsupervised_filename='../data/unsupervised_clusters.npy'):
     """
     Discovers patient cohorts in an unsupervised way using two steps: 1) Apply an LSTM autoencoder
@@ -769,6 +769,10 @@ def discover_cohorts(cutoff_hours=24, gap_hours=12, train_val_random_seed=0, emb
     cohort_unsupervised : NumPy array of integers
         Array indicating cohort membership for each patient.
     """
+
+    # setting the seeds to get reproducible results
+    # taken from https://stackoverflow.com/questions/36288235/how-to-get-stable-results-with-tensorflow-setting-random-seed
+    set_global_determinism(seed=seed)
 
     X, Y, careunits, sapsii_quartile, subject_ids = prepare_data(cutoff_hours=cutoff_hours, gap_hours=gap_hours)
 
@@ -856,9 +860,16 @@ def set_global_determinism(seed):
 
     os.environ['TF_DETERMINISTIC_OPS'] = '1'
     os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
-    
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-    tf.config.threading.set_intra_op_parallelism_threads(1)
+
+    try:
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+    except Exception:
+        pass
+
+    try:
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+    except Exception:
+        pass
 
 def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_bootstrap_samples=100, sensitivity=0.8):
     """ 
