@@ -1264,8 +1264,12 @@ def run_mortality_prediction_task(model_type='global',
 
             for task in tasks:
                 auc = roc_auc_score(y_test[cohorts_test == task], y_scores[cohorts_test == task])
-                ppv = precision_score(y_test[cohorts_test == task], y_pred[cohorts_test == task])
-                specificity = recall_score(y_test[cohorts_test == task], y_pred[cohorts_test == task], pos_label=0)
+                _, tpr, thresholds = roc_curve(y_test[cohorts_test == task], y_scores[cohorts_test == task]) # get TPR, aka sensitivity, and thresholds
+                threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
+                # Why 80% threshold? That is what the paper selected to display the results 
+                y_pred = (y_scores[cohorts_test == task] > threshold_target).astype("int32") # use calculated threshold to do predictions
+                ppv = precision_score(y_test[cohorts_test == task], y_pred)
+                specificity = recall_score(y_test[cohorts_test == task], y_pred, pos_label=0)
                 metrics_df.loc[str(task), 'AUC'] = auc
                 metrics_df.loc[str(task), 'PPV'] = ppv
                 metrics_df.loc[str(task), 'Specificity'] = specificity
@@ -1275,6 +1279,10 @@ def run_mortality_prediction_task(model_type='global',
 
             # calculate micro AUC
             metrics_df.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_scores)
+            _, tpr, thresholds = roc_curve(y_test, y_scores) # get TPR, aka sensitivity, and thresholds
+            threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
+            # Why 80% threshold? That is what the paper selected to display the results 
+            y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
             metrics_df.loc['Micro', 'PPV'] = precision_score(y_test, y_pred)
             metrics_df.loc['Micro', 'Specificity'] = recall_score(y_test, y_pred, pos_label=0)
         
