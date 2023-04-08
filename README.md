@@ -22,7 +22,7 @@ all_hourly_data.h5 (an HDF File resulting from MIMIC-Extract pipeline)
 code_status.csv (MIMIC-III concept table)
 sapsii.csv (MIMIC-III concept table)
 ```
-MIMIC-III Concept tables can be generated following instructions in this [GitHub link]((https://github.com/MIT-LCP/mimic-code/tree/main/mimic-iii/concepts#generating-the-concepts-in-postgresql))
+MIMIC-III Concept tables can be generated following instructions in this [GitHub link](https://github.com/MIT-LCP/mimic-code/tree/main/mimic-iii/concepts#generating-the-concepts-in-postgresql)
 
 ## 2.Code
 All code needed to replicate the paper is in our github repo inside a Python module called [mtl_patients](https://github.com/ger6-illini/dl4h-sp23-team27-project/blob/main/code/mtl_patients.py).
@@ -76,7 +76,7 @@ For benchmarking purposes of the entire pipeline, the authors compared the resul
 
 The overall performance of this model is measured using both macro and micro metrics (section 4.3 in the paper) where:
 * In *micro* metrics all predicted probabilities for all patients are treated as if they come from a single classifier: $\text{Metric}_\text{Micro} = \text{Metric}([\hat{y}_0, ..., \hat{y}_k], [y_0, ..., y_K])$.
-* In *macro* metrics probabilities are evaluated on a *per cohort* basis, and then averaged: $\text{Metric}_\text{Macro} = \dfrac{1}{K} \displaystyle\sum_{k=0}^K \text{Metric}(\hat{y}_K, y_K)$.
+* In *macro* metrics probabilities are evaluated on a *per cohort* basis, and then averaged: $Metric_{\text{Macro}} =\dfrac{1}{K} \displaystyle\sum_{k=0}^k Metric(\hat{y}_k,y_k)$.
 
 Paper suggests that, although micro metrics are the ones typically chosen in the literature, evaluating performance on different subpopulations will benefit from macro metrics instead of micro metrics specially when there is class imbalance in every cohort. All results show macro and micro versions of the metrics for the aggregate performance of the models.
 
