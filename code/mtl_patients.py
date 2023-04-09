@@ -950,15 +950,18 @@ def bootstrap_predict(X_test, y_test, cohorts_test, task, model, tasks=[], num_b
 
         # run prediction for the bootstrap sample
         y_scores = np.squeeze(model.predict(X_bootstrap_sample_task, batch_size=128, verbose=0))
-        _, tpr, thresholds = roc_curve(y_bootstrap_sample_task, y_scores) # get TPR, aka sensitivity, and thresholds
-        threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
-        # Why 80% threshold? That is what the paper selected to display the results 
-        y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
         if len(y_scores) < len(y_bootstrap_sample_task):
             y_scores = get_correct_task_mtl_outputs(y_scores, cohorts_bootstrap_sample_task, tasks)
-            y_pred = get_correct_task_mtl_outputs(y_pred, cohorts_bootstrap_sample_task, tasks)
 
-        # calculate AUC and store in array
+        ## get TPR, aka sensitivity, and thresholds
+        _, tpr, thresholds = roc_curve(y_bootstrap_sample_task, y_scores)
+        ## threshold close to give target TPR, e.g., 80%
+        threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))]
+        ### Why 80% threshold? That is what the paper selected to display the results 
+        ## use calculated threshold to do predictions
+        y_pred = (y_scores > threshold_target).astype("int32")
+
+        # calculate metrics
         try:
             auc = roc_auc_score(y_bootstrap_sample_task, y_scores)
             all_auc.append(auc)
@@ -1245,10 +1248,6 @@ def run_mortality_prediction_task(model_type='global',
         print('    ' + '~' * 76)
         print(f"    Predicting using '{model_type}' model...", flush=True)
         y_scores = np.squeeze(model.predict(X_test))
-        _, tpr, thresholds = roc_curve(y_test, y_scores) # get TPR, aka sensitivity, and thresholds
-        threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
-        # Why 80% threshold? That is what the paper selected to display the results 
-        y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
 
         # calculate AUC, PPV, and Specificity for every cohort
         # https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8156826/
@@ -1263,26 +1262,34 @@ def run_mortality_prediction_task(model_type='global',
             metrics_df = pd.DataFrame(index=np.append(tasks_str, ['Macro', 'Micro']), dtype=float)
 
             for task in tasks:
+                ## get TPR, aka sensitivity, and thresholds
+                _, tpr, thresholds = roc_curve(y_test[cohorts_test == task], y_scores[cohorts_test == task])
+                ## threshold close to give target TPR, e.g., 80%
+                threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))]
+                ### Why 80% threshold? That is what the paper selected to display the results
+                ## use calculated threshold to do predictions
+                y_pred = (y_scores[cohorts_test == task] > threshold_target).astype("int32")
+
                 auc = roc_auc_score(y_test[cohorts_test == task], y_scores[cohorts_test == task])
-                _, tpr, thresholds = roc_curve(y_test[cohorts_test == task], y_scores[cohorts_test == task]) # get TPR, aka sensitivity, and thresholds
-                threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
-                # Why 80% threshold? That is what the paper selected to display the results 
-                y_pred = (y_scores[cohorts_test == task] > threshold_target).astype("int32") # use calculated threshold to do predictions
                 ppv = precision_score(y_test[cohorts_test == task], y_pred)
                 specificity = recall_score(y_test[cohorts_test == task], y_pred, pos_label=0)
                 metrics_df.loc[str(task), 'AUC'] = auc
                 metrics_df.loc[str(task), 'PPV'] = ppv
                 metrics_df.loc[str(task), 'Specificity'] = specificity
 
-            # calculate macro AUC
+            # calculate macro metrics
             metrics_df.loc['Macro', :] = metrics_df.loc[(metrics_df.index != 'Macro') & (metrics_df.index != 'Micro')].mean()
 
-            # calculate micro AUC
+            # calculate micro metrics
+            ## get TPR, aka sensitivity, and thresholds
+            _, tpr, thresholds = roc_curve(y_test, y_scores)
+            ## threshold close to give target TPR, e.g., 80%
+            threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))]
+            ### Why 80% threshold? That is what the paper selected to display the results
+            ## use calculated threshold to do predictions
+            y_pred = (y_scores > threshold_target).astype("int32")
+
             metrics_df.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_scores)
-            _, tpr, thresholds = roc_curve(y_test, y_scores) # get TPR, aka sensitivity, and thresholds
-            threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
-            # Why 80% threshold? That is what the paper selected to display the results 
-            y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
             metrics_df.loc['Micro', 'PPV'] = precision_score(y_test, y_pred)
             metrics_df.loc['Micro', 'Specificity'] = recall_score(y_test, y_pred, pos_label=0)
         
@@ -1292,6 +1299,7 @@ def run_mortality_prediction_task(model_type='global',
             tasks_str = [str(task) for task in tasks]
             lst_of_tasks = list(tasks_str)
             lst_of_tasks.append('Micro')
+            lst_of_tasks.append('Macro')
 
             idx = pd.MultiIndex.from_product([lst_of_tasks, list(np.arange(1, 101).astype(str))], names=['Cohort', 'Sample'])
             metrics_df = pd.DataFrame(index=idx, columns=['AUC', 'PPV', 'Specificity'], dtype=float)
@@ -1304,7 +1312,9 @@ def run_mortality_prediction_task(model_type='global',
                 metrics_df.loc[str(task), 'Specificity'] = all_specificity
 
             # calculate macro AUC
-            metrics_df.loc['Macro', :] = metrics_df.query("Cohort != 'Micro'").mean().values
+            metrics_df.loc['Macro', 'AUC'] = metrics_df.query("Cohort != 'Micro' and Cohort != 'Macro'").groupby('Sample').mean()['AUC'].values
+            metrics_df.loc['Macro', 'PPV'] = metrics_df.query("Cohort != 'Micro' and Cohort != 'Macro'").groupby('Sample').mean()['PPV'].values
+            metrics_df.loc['Macro', 'Specificity'] = metrics_df.query("Cohort != 'Micro' and Cohort != 'Macro'").groupby('Sample').mean()['Specificity'].values
 
             # calculate micro AUC
             all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, 'all', model,
@@ -1343,11 +1353,6 @@ def run_mortality_prediction_task(model_type='global',
         print(f"    Predicting using '{model_type}' model...", flush=True)
         # calculated scores will be an array of `num_tasks` predictions
         y_scores = np.squeeze(model.predict(X_test))
-        # get TPR, aka sensitivity, and thresholds (using micro metric)
-        _, tpr, thresholds = roc_curve(y_test, y_scores[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))])
-        threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))] # threshold close to give target TPR, e.g., 80%
-        # Why 80% threshold? That is what the paper selected to display the results 
-        y_pred = (y_scores > threshold_target).astype("int32") # use calculated threshold to do predictions
 
         # calculate AUC, PPV, and Specificity for every cohort
         # https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8156826/
@@ -1363,8 +1368,16 @@ def run_mortality_prediction_task(model_type='global',
 
             for task in tasks:
                 y_scores_in_cohort = y_scores[cohort_to_index[task], cohorts_test == task]
-                y_pred_in_cohort = y_pred[cohort_to_index[task], cohorts_test == task]
                 y_true_in_cohort = y_test[cohorts_test == task]
+
+                ## get TPR, aka sensitivity, and thresholds (using micro metric)
+                _, tpr, thresholds = roc_curve(y_true_in_cohort, y_scores_in_cohort)
+                ## threshold close to give target TPR, e.g., 80%
+                threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))]
+                ### Why 80% threshold? That is what the paper selected to display the results
+                ## use calculated threshold to do predictions
+                y_pred_in_cohort = (y_scores_in_cohort > threshold_target).astype("int32")
+
                 auc = roc_auc_score(y_true_in_cohort, y_scores_in_cohort)
                 ppv = precision_score(y_true_in_cohort, y_pred_in_cohort, zero_division=0)
                 specificity = recall_score(y_true_in_cohort, y_pred_in_cohort, pos_label=0)
@@ -1372,13 +1385,21 @@ def run_mortality_prediction_task(model_type='global',
                 metrics_df.loc[str(task), 'PPV'] = ppv
                 metrics_df.loc[str(task), 'Specificity'] = specificity
 
-            # calculate macro AUC
+            # calculate macro metrics
             metrics_df.loc['Macro', :] = metrics_df.loc[(metrics_df.index != 'Macro') & (metrics_df.index != 'Micro')].mean()
 
-            # calculate micro AUC
+            # calculate micro metrics
+            ## get TPR, aka sensitivity, and thresholds
+            _, tpr, thresholds = roc_curve(y_test, y_scores[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))])
+            ## threshold close to give target TPR, e.g., 80%
+            threshold_target = thresholds[np.argmin(np.abs(tpr - sensitivity))]
+            ### Why 80% threshold? That is what the paper selected to display the results
+            ## use calculated threshold to do predictions
+            y_pred = (y_scores[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))] > threshold_target).astype("int32")
+
             metrics_df.loc['Micro', 'AUC'] = roc_auc_score(y_test, y_scores[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))])
-            metrics_df.loc['Micro', 'PPV'] = precision_score(y_test, y_pred[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))])
-            metrics_df.loc['Micro', 'Specificity'] = recall_score(y_test, y_pred[[cohort_to_index[c] for c in cohorts_test], np.arange(len(y_test))], pos_label=0)
+            metrics_df.loc['Micro', 'PPV'] = precision_score(y_test, y_pred)
+            metrics_df.loc['Micro', 'Specificity'] = recall_score(y_test, y_pred, pos_label=0)
         
         else:
             # get `num_bootstrapped_samples` and calculate AUC, PPV, and specificity
@@ -1386,6 +1407,7 @@ def run_mortality_prediction_task(model_type='global',
             tasks_str = [str(task) for task in tasks]
             lst_of_tasks = list(tasks_str)
             lst_of_tasks.append('Micro')
+            lst_of_tasks.append('Macro')
 
             idx = pd.MultiIndex.from_product([lst_of_tasks, list(np.arange(1, 101).astype(str))], names=['Cohort', 'Sample'])
             metrics_df = pd.DataFrame(index=idx, columns=['AUC', 'PPV', 'Specificity'], dtype=float)
@@ -1397,10 +1419,12 @@ def run_mortality_prediction_task(model_type='global',
                 metrics_df.loc[str(task), 'PPV'] = all_ppv
                 metrics_df.loc[str(task), 'Specificity'] = all_specificity
 
-            # calculate macro AUC
-            metrics_df.loc['Macro', :] = metrics_df.query("Cohort != 'Micro'").mean().values
+            # calculate macro metrics
+            metrics_df.loc['Macro', 'AUC'] = metrics_df.query("Cohort != 'Micro' and Cohort != 'Macro'").groupby('Sample').mean()['AUC'].values
+            metrics_df.loc['Macro', 'PPV'] = metrics_df.query("Cohort != 'Micro' and Cohort != 'Macro'").groupby('Sample').mean()['PPV'].values
+            metrics_df.loc['Macro', 'Specificity'] = metrics_df.query("Cohort != 'Micro' and Cohort != 'Macro'").groupby('Sample').mean()['Specificity'].values
 
-            # calculate micro AUC
+            # calculate micro metrics
             all_auc, all_ppv, all_specificity = bootstrap_predict(X_test, y_test, cohorts_test, 'all', model,
                                                                   tasks=tasks, num_bootstrap_samples=num_bootstrapped_samples)
             metrics_df.loc['Micro', 'AUC'] = all_auc
