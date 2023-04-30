@@ -3,16 +3,19 @@
 ##### {ger6, kakwani2}@illinois.edu
 ##### Group ID: 27 | Paper ID: 181
 ---
-## Paper
 
-In this project, we aim to reproduce the paper [Learning Task for Multitask Learning: Heterogeneous Patient Populations in the ICU by (Suresh et al, 2018)](https://arxiv.org/abs/1806.02878). In this paper, the authors propose a novel two-step pipeline to predict in-hospital mortality across patient populations with different characteristics. 
+## Original Paper
 
--    Step 1. Divide patients into relevant non-overlapping cohorts in an unsupervised way using a long short-term memory (LSTM) autoencoder followed by a Gaussian Mixture Model (GMM).
--    Step 2. predicts in-hospital mortality for each patient cohort identified in the previous step using an LSTM based multi-task learning model where every cohort is considered a different task.
+**Citation to the original paper**
 
- The paper claims that by applying this pipeline there will be better predictive results when compared to a model applied to the aggregate population using a single task learning model. According to the authors, the better performance given by this pipeline is due to the combination of a multi-task learning model leveraging shared knowledge across distinct patient groups and the way how those groups were created, i.e., identification using a data-driven method rather than relying on domain knowledge or auxiliary labels.
+Suresh, Harini, Gong, Jen J, Guttag, John V. Learning Tasks for Multitask Learning: Heterogenous Patient Populations in the ICU. In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining (KDD '18). Association for Computing Machinery, New York, NY, USA, 802–810. https://doi.org/10.1145/3219819.3219930
 
-## 1.Data
+**Repository Link**
+
+https://github.com/mit-ddig/multitask-patients
+
+
+## Data
 
 This paper uses the publicly available [MIMIC-III database](https://www.nature.com/articles/sdata201635) which contains clinical data in a critical care setting. After reviewing the paper in detail, we decided to use [MIMIC-Extract](https://arxiv.org/abs/1907.08322), an open source pipeline by (Wang et al., 2020) for transforming the raw EHR data into usable Pandas dataframes containing hourly time series of vitals and laboratory measurements after performing unit conversion, outlier handling, and aggregation of semantically similar features.
 
@@ -24,12 +27,41 @@ sapsii.csv (MIMIC-III concept table)
 ```
 MIMIC-III Concept tables can be generated following instructions in this [GitHub link](https://github.com/MIT-LCP/mimic-code/tree/main/mimic-iii/concepts#generating-the-concepts-in-postgresql)
 
-## 2.Code
-All code needed to replicate the paper is in our github repo inside a Python module called [mtl_patients](https://github.com/ger6-illini/dl4h-sp23-team27-project/blob/main/code/mtl_patients.py).
+## Dependencies
 
-## 3.Method
+You'll need a working Python environment to run the code.
+The recommended way to set up your environment is through the
+[Anaconda Python distribution](https://www.anaconda.com/download/) which
+provides the `conda` package manager.
+Anaconda can be installed in your user directory and does not interfere with
+the system Python installation.
+The required dependencies are specified in the file `environment.yml`.
 
-### 3.1 Discovering Patient Cohorts : 
+We use `conda` virtual environments to manage the project dependencies in
+isolation.
+Thus, you can install our dependencies without causing conflicts with your
+setup (even with different Python versions).
+
+Run the following command in the repository folder (where `environment.yml`
+is located) to create a separate environment and install all required
+dependencies in it:
+
+    conda env create
+
+
+## Code
+
+1. [mtl_patients.py](https://github.com/ger6-illini/dl4h-sp23-team27-project/blob/main/code/mtl_patients.py) has methods to pre-process data, generate summaries, discover cohorts and run mortality predictions.
+2. [cs598-dl4h-team27-paper181.ipynb](https://github.com/ger6-illini/dl4h-sp23-team27-project/blob/main/notebooks/cs598-dl4h-team27-paper181.ipynb) notebook has steps and results for 24 hours and 48 hours initial period of ICU stay experiments.
+
+## Method
+
+In this paper, the authors propose a novel two-step pipeline to predict in-hospital mortality across patient populations with different characteristics. 
+
+-    **Step 1. Discovering Patient Cohorts** by dividing patients into relevant non-overlapping cohorts in an unsupervised way using a long short-term memory (LSTM) autoencoder followed by a Gaussian Mixture Model (GMM).
+-    **Step 2. Predicts in-hospital mortality** for each patient cohort identified in the previous step using an LSTM based multi-task learning model where every cohort is considered a different task.
+
+### Step 1 Discovering Patient Cohorts : 
 
 In order to identify meaningful patient cohorts, the paper proposes to process the raw patient data in such a way that the result is a 3D matrix of shape $(P \times T \times F)$ where $P$ represents the number of patients, $T$ the number of timesteps, and $F$ the number of features as depicted in the figure below (in blue) which is partially based on Figure 2 of the original paper. All numbers shown in the figure below correspond to a specific experiment published in the paper in which the observation window is limited to the first $24$ hours (cutoff period) after a patient goes into a careunit and there is a gap of $12$ hours (gap period) between the end of the observation window and the beginning of the prediction window where the prediction task is in-hospital mortality.
 
@@ -51,7 +83,7 @@ The training data is used to train an LSTM autoencoder. The main purpose of the 
 Once the embeddings are calculated, a Gaussian Mixture Model is applied using $3$ clusters (the value the authors considered optimal). The result are the three green boxes representing three cohorts discovered in an unsupervised way and grouping similar patients based on the three static and the 29 time-varying vitals/labs selected from the MIMIC-III database.
 
 
-### 3.2 Predicting In-Hospital Mortality : 
+### Step 2 Predicting In-Hospital Mortality : 
 
 
 As mentioned in the previous section, the paper uses a two-step pipeline to: 1) identify relevant patient cohorts, and 2) use those relevant cohorts as separate tasks in a multi-lask learning framework to predict in-hospital mortality. In this section, we will focus on the second step of the pipeline, i.e., use multi-task learning to make in-hospital mortality predictions for different patient cohorts.
@@ -87,19 +119,122 @@ All results being used for comparison between models by the paper will use three
 
 All in-hospital mortality prediction tasks are implemented using the function `run_mortality_prediction_task()`. This function will call other functions to prepare the data, split the data in training/validation/test data sets, train the corresponding model, predict using the resulting model, and calculate the metrics of the model.
 
-## 4.Ablation
+## Results
 
-We performed following three ablation studies
 
-* Using the first 18 hours of data from the patient’s stay to predict in-hospital mortality starting at 27 hours into the stay
-* Using the first 36 hours of data from the patient’s stay to predict in-hospital mortality starting at 54 hours into the stay
-* Using only 25 lab and vital measurements out of total 29. We excluded bicarbonate, fraction inspired oxygen, glascow coma scale total and platelets lab measurements of blood measurements type out of the original list.  
+### Paper Reproduction Result
 
-### 4.1 Discover Cohorts :
+24 Hours and 48 hours Mortality Prediction experiment shows performance differences between multi-task and global models on specific cohorts.
+Significant differences (p < 0.01) are shown in bold.
 
-We analyzed the results of task ”Identifying distinct patient cohorts” by comparing associated lab and vital heat maps of z-scores from 18 hours, 24 hours and 36 hours of initial patient’s ICU stay experiment. We observed that cohort distinction improves from 18 hours to 36 hours, which suggests it is better to have more hours of initial ICU stay data to identify meaningful distinct cohorts. For 25 lab and vital ablation study, we noticed changes in cohort size and mortality numbers for 24 hours experiment, but no change in 48 hours experiment numbers.
+<table>
+<tr><th> Paper Reproduction Results: 24 Hours and 48 Hours Mortality Predictions </th></tr>
+<tr><td>    
 
-### 4.2 Mortality Prediction :
+|            |              |        || AUC    |            |              |  | PPV    |            |              | |Specificity |            |              |
+|------------|--------------|--------|---|--------|------------|--------------|---|--------|------------|--------------|---|-------------|------------|--------------|
+| Experiment |  Cohort type | Cohort |\| | Global | Multi-task |      p-value |\|  | Global | Multi-task |      p-value |\||      Global | Multi-task |      p-value |
+|   24 hours |    Careunits |    CCU | | **0.865** |      0.857 |8.3 x 10<sup>-7</sup> ||  **0.206** |      0.195 | 1.03 x 10<sup>-3</sup> ||       0.785 |      0.778 | 1.48 x 10<sup>-1</sup> |
+|            |              |   CSRU | | 0.889 |      **0.903** | 4.05 x 10<sup>-10</sup> ||  **0.098** |      0.093 | 5.46 x 10<sup>-2</sup> ||       0.846 |      0.848 | 3.11 x 10<sup>-1</sup> |
+|            |              |   MICU | | 0.828 |      **0.833** | 5.07 x 10<sup>-9</sup> ||  0.227 |      **0.243** | 1.28 x 10<sup>-14</sup> ||       0.681 |      **0.709** | 8.44 x 10<sup>-15</sup> |
+|            |              |   SICU | | **0.855** |      0.842 | 1.29 x 10<sup>-16</sup> ||  0.209 |      0.210 | 6.51 x 10<sup>-1</sup> ||      0.742 |      0.745 | 6.5 x 10<sup>-1</sup> |
+|            |              |  TSICU | | 0.865 |      **0.871** | 2.5 x 10<sup>-7</sup> ||  **0.222** |      0.211 | 2.85 x 10<sup>-3</sup> ||       **0.797** |      0.788 | 4.07 x 10<sup>-3</sup> |
+|            |              |  Macro | | 0.860 |      0.861 | 2.77 x 10<sup>-1</sup> ||  **0.192** |      0.190 | 6.46 x 10<sup>-2</sup> ||       0.770 |      0.774 | 3.59 x 10<sup>-1</sup> |
+|            |              |  Micro | | 0.862 |      **0.864** | 8.84 x 10<sup>-4</sup> ||  0.202 |      **0.216** | 4.91 x 10<sup>-17</sup> ||       0.759 |      **0.778** | 5.0 x 10<sup>-17</sup> |
+|            | Unsupervised |      0 | | **0.871** |      0.857 | 4.23 x 10<sup>-18</sup> ||  **0.194** |      0.176 | 5.4 x 10<sup>-10</sup> ||       **0.777** |      0.744 | 2.86 x 10<sup>-11</sup> |
+|            |              |      1 | | 0.828 |      **0.832** | 3.08 x 10<sup>-8</sup> ||  0.217 |      **0.223** | 3.06 x 10<sup>-6</sup> ||       0.701 |      **0.713** | 2.02 x 10<sup>-6</sup> |
+|            |              |      2 | | 0.896 |      **0.903** | 1.61 x 10<sup>-13</sup> ||  0.171 |      **0.193** | 1.02 x 10<sup>-13</sup> ||       0.807 |      **0.830** | 6.98 x 10<sup>-13</sup> |
+|            |              |  Macro | |**0.865** |      0.864 | 2.61 x 10<sup>-3</sup> ||  0.194 |      **0.197** | 9.65 x 10<sup>-3</sup> ||       0.762 |      0.762 | 7.7 x 10<sup>-1</sup> |
+|            |              |  Micro | | 0.865 |      0.865 | 4.94 x 10<sup>-1</sup> ||  0.204 |      **0.210** | 8.03 x 10<sup>-7</sup> ||       0.762 |      **0.770** | 1.74 x 10<sup>-6</sup> |
+|   48 hours |    Careunits |    CCU | | 0.837 |      **0.850** | 2.3 x 10<sup>-9</sup> ||  0.170 |      0.172 | 1.47 x 10<sup>-1</sup> ||       0.738 |      **0.749** | 5.96 x 10<sup>-2</sup> |
+|            |              |   CSRU | | **0.926** |      0.914 | 5.01 x 10<sup>-12</sup> ||  **0.099** |      0.092 | 3.04 x 10<sup>-2</sup> ||       **0.880** |      0.868 | 3.78 x 10<sup>-3</sup> |
+|            |              |   MICU | | 0.824 |      **0.829** | 4.2 x 10<sup>-6</sup> || 0.188 |      **0.193** | 1.73 x 10<sup>-3</sup> ||       0.689 |      **0.702** | 5.14 x 10<sup>-4</sup> |
+|            |              |   SICU | | 0.861 |     **0.872** | 5.79 x 10<sup>-11</sup> ||  0.211 |      **0.238** | 1.3 x 10<sup>-9</sup> ||       0.805 |      **0.828** | 4.12 x 10<sup>-7</sup> |
+|            |              |  TSICU | | 0.797 |     **0.832** | 1.66 x 10<sup>-17</sup> ||  0.109 |      **0.148** | 4.18 x 10<sup>-18</sup> ||       0.651 |      **0.756** | 4.39 x 10<sup>-18</sup> |
+|            |              |  Macro | | 0.849 |      **0.859** | 3.51 x 10<sup>-16</sup> ||  0.156 |      **0.169** | 4.95 x 10<sup>-11</sup> ||       0.753 |      **0.781** | 3.91 x 10<sup>-15</sup> |
+|            |              |  Micro | | 0.852 |      **0.862** | 1.09 x 10<sup>-17</sup> ||  0.157 |      **0.175** | 5.37 x 10<sup>-18</sup> ||       0.740 |      **0.773** | 5.48 x 10<sup>-18</sup> |
+|            | Unsupervised |      0 | | 0.847 |      **0.849** | 1.12 x 10<sup>-5</sup> ||  0.145 |      **0.157** | 6.36 x 10<sup>-16</sup> ||       0.730 |      **0.754** | 4.56 x 10<sup>-16</sup> |
+|            |              |      1 | | 0.863 |      **0.871** | 8.71 x 10<sup>-15</sup> ||  0.192 |      **0.200** | 1.76 x 10<sup>-5</sup> ||       0.779 |      **0.792** | 2.22 x 10<sup>-6</sup> |
+|            |              |  Macro | | 0.855 |      **0.860** | 1.04 x 10<sup>-15</sup> ||  0.169 |      **0.179** | 1.11 x 10<sup>-10</sup> ||       0.754 |     **0.773** | 2.53 x 10<sup>-14</sup> |
+|            |              |  Micro | | 0.853 |      **0.857** | 1.41 x 10<sup>-15</sup> ||  0.158 |      **0.168** | 4.06 x 10<sup>-16</sup> ||       0.743 |      **0.760** | 3.45 x 10<sup>-16</sup> |
 
-We also compared all ablation study results with their corresponding reproduction study experiment results for the ”mortality prediction” task. In both 18 hour and 36 hour ablation study experiments, global task performed better compared to Multi-task for both cohort types - careunits and Unsupervised, which is not what original paper claims in their results. In the 25 lab and vital ablation study, we saw a drop in Multi-task performance i.e. for 48 hours (careunits) group, multi-task had poor performance against global task, which was not the case in our reproduction final results. For 48 hours (Unsupervised) group, multi-task continue to perform better. For 24 hours ( unsupervised and careunits) groups, we still continue to have global task perform better compared to Multi-task.
+</td>                
+</tr> 
+</table>
+
+
+### Results Comparison 
+
+#### 1. Original Paper (Table 4) - 24 Hours Mortality Prediction 
+
+<table>
+<tr><th>Original Paper Result (24 Hours) </th><th>Reproduction Paper Result (24 Hours)</th></tr>
+<tr><td>
+
+|             |        | AUC       |            | PPV       |            | Specificity |            |
+|-------------|--------|-----------|------------|-----------|------------|-------------|------------|
+| Cohort type | Cohort | Global    | Multi-task | Global    | Multi-task | Global      | Multi-task |
+| Careunits   | CCU    | **0.862** | 0.861      | **0.248** | 0.229      | **0.834**   | 0.819      |
+|             | CSRU   | 0.849     | **0.867**  | 0.107     | **0.117**  | 0.893       | **0.898**  |
+|             | MICU   | 0.814     | **0.832**  | 0.261     | **0.262**  | 0.764       | **0.766**  |
+|             | SICU   | 0.839     | **0.855**  | 0.226     | **0.238**  | 0.781       | **0.796**  |
+|             | TSICU  | 0.846     | **0.869**  | 0.183     | **0.192**  | 0.823       | **0.818**  |
+|             | Macro  | 0.842     | **0.857**  | 0.205     | **0.208**  | 0.819       | 0.819      |
+|             | Micro  | 0.852     | **0.866**  | 0.231     | **0.233**  | 0.817       | **0.821**  |
+| Unsupervised| 0      | 0.803     | **0.819**  | 0.083     | **0.103**  | 0.732       | **0.786**  |
+|             | 1      | 0.811     | **0.829**  | 0.120     | **0.126**  | 0.916       | 0.915      |
+|             | 2      | 0.814     | **0.821**  | 0.276     | **0.288**  | 0.734       | **0.742**  |
+|             | Macro  | 0.809     | **0.823**  | 0.159     | **0.172**  | 0.794       | **0.814**  |
+|             | Micro  | 0.852     | **0.858**  | **0.231** | 0.228      | **0.817**   | 0.814      |
+
+</td><td>
+
+|              |        | AUC       |            | PPV       |            | Specificity |            |
+|--------------|--------|-----------|------------|-----------|------------|-------------|------------|
+| Cohort type  | Cohort | Global    | Multi-task | Global    | Multi-task | Global      | Multi-task |
+| Careunits    | CCU    | **0.865** | 0.857      | **0.206** | 0.195      | 0.785       | 0.778      |
+|              | CSRU   | 0.889     | **0.903**  | **0.098** | 0.093      | 0.846       | 0.848      |
+|              | MICU   | 0.828     | **0.833**  | 0.227     | **0.243**  | 0.681       | **0.709**  |
+|              | SICU   | **0.855** | 0.842      | 0.209     | 0.210      | 0.742       | 0.745      |
+|              | TSICU  | 0.865     | **0.871**  | **0.222** | 0.211      | **0.797**   | 0.788      |
+|              | Macro  | 0.860     | 0.861      | **0.192** | 0.190      | 0.770       | 0.774      |
+|              | Micro  | 0.862     | **0.864**  | 0.202     | **0.216**  | 0.759       | **0.778**  |
+| Unsupervised | 0      | **0.871** | 0.857      | **0.194** | 0.176      | **0.777**   | 0.744      |
+|              | 1      | 0.828     | **0.832**  | 0.217     | **0.223**  | 0.701       | **0.713**  |
+|              | 2      | 0.896     | **0.903**  | 0.171     | **0.193**  | 0.807       | **0.830**  |
+|              | Macro  | **0.865** | 0.864      | 0.194     | **0.197**  | 0.762       | 0.762      |
+|              | Micro  | 0.865     | 0.865      | 0.204     | **0.210**  | 0.762       | **0.770**  |
+
+</td></tr> </table>
+
+
+#### 2. Original Paper (Table 5) - 48 Hours Mortality Prediction 
+
+<table>
+<tr><th>Original Paper Result (48 Hours) </th><th>Reproduction Paper Result (48 Hours)</th></tr>
+<tr><td>
+
+|              |        | AUC       |            | PPV       |            | Specificity |            |
+|--------------|--------|-----------|------------|-----------|------------|-------------|------------|
+| Cohort type  | Cohort | Global    | Multi-task | Global    | Multi-task | Global      | Multi-task |
+| Careunits    | Macro  | **0.859** | 0.839      | **0.187** | 0.170      | **0.833**   | 0.826      |
+|              | Micro  | **0.865** | 0.856      | **0.206** | 0.198      | **0.833**   | 0.832      |
+| Unsupervised | Macro  | 0.834     | 0.833      | 0.154     | 0.154      | **0.789**   | 0.775      |
+|              | Micro  | **0.865** | 0.861      | 0.206     | 0.191      | **0.833**   | 0.812      |
+
+</td><td>
+
+|              |        | AUC    |            | PPV    |            | Specificity |            |
+|--------------|--------|--------|------------|--------|------------|-------------|------------|
+| Cohort type  | Cohort | Global | Multi-task | Global | Multi-task | Global      | Multi-task |
+| Careunits    | Macro  | 0.849  | **0.859**  | 0.156  | **0.169**  | 0.753       | **0.781**  |
+|              | Micro  | 0.852  | **0.862**  | 0.157  | **0.175**  | 0.740       | **0.773**  |
+| Unsupervised | Macro  | 0.855  | **0.860**  | 0.169  | **0.179**  | 0.754       | **0.773**  |
+|              | Micro  | 0.853  | **0.857**  | 0.158  | **0.168**  | 0.743       | **0.760**  |
+
+</td></tr> </table>
+
+
+
+
 
