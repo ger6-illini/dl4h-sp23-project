@@ -42,3 +42,5 @@ Thumbs.db
 /data/code_status.csv
 /data/saps.csv
 /data/sapsii.csv
+*.h5
+*.npy

@@ -18,14 +18,6 @@ https://github.com/mit-ddig/multitask-patients
 
 This paper uses the publicly available [MIMIC-III database](https://www.nature.com/articles/sdata201635) which contains clinical data in a critical care setting. After reviewing the paper in detail, we decided to use [MIMIC-Extract](https://arxiv.org/abs/1907.08322), an open source pipeline by (Wang et al., 2020) for transforming the raw EHR data into usable Pandas dataframes containing hourly time series of vitals and laboratory measurements after performing unit conversion, outlier handling, and aggregation of semantically similar features.
 
-There are three data files required -
-``` 
-all_hourly_data.h5 (an HDF File resulting from MIMIC-Extract pipeline)
-code_status.csv (MIMIC-III concept table)
-sapsii.csv (MIMIC-III concept table)
-```
-MIMIC-III Concept tables can be generated following instructions in this [GitHub link](https://github.com/MIT-LCP/mimic-code/tree/main/mimic-iii/concepts#generating-the-concepts-in-postgresql)
-
 ## Dependencies
 
 You'll need a working Python environment to run our code. The recommended way to set up your environment is through the [Anaconda Python distribution](https://www.anaconda.com/download/) which provides the `conda` package manager. Anaconda can be installed in your user directory and does not interfere with the system Python installation. The required dependencies are specified in the file `environment.yml` inside the cloned github repo folder.
